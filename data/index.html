@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+    <meta charset='UTF-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <title>EDA-Robot</title>
+    <style>
+
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            text-align: center;
+        }
+
+        h1 {
+            text-align: center;
+        }
+
+        .button {
+            display: inline-block;
+            height: 30px;
+            width: 300px;
+            margin-top: 20px;
+
+            padding: 10px 20px;
+            background-color: deepskyblue;
+            color: #fff;
+            border: none;
+            border-radius: 20px; /* 添加圆角 */
+            text-decoration: none;
+            line-height: 2; /* 通过调整line-height的值来调整文字的垂直位置 */
+            text-align: center; /* 文字居中 */
+            box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.2); /* 添加立体感 */
+            transition: all 0.3s ease; /* 添加过渡效果 */
+        }
+
+        .button:hover {
+            background-color: skyblue; /* 鼠标悬停时的背景颜色 */
+            transform: translateY(2px); /* 点击效果 */
+            box-shadow: 2px 2px 8px rgba(0, 0, 0, 0.3); /* 添加更多立体感 */
+        }
+        .search-box {
+            margin-top: 20px;
+            display: inline-block;
+            height: 30px;
+            width: 300px;
+            padding: 5px 10px;
+            background-color: #f0f0f0;
+            border: 1px solid #ccc;
+            border-radius: 20px;
+            text-align: center; /* 文字居中 */
+        }
+        .hidden {
+            display: none; /* 初始隐藏 */
+        }
+    </style>
+
+</head>
+<body>
+<form action='/connect' method='POST'>
+    <div class='container'>
+        <h1>TV-PRO设备配置页</h1>
+        <p>本项目基于立创ESP32S3开发板开发</p>
+        <input type='text' name='ssid' placeholder='输入WIFI名称' class='search-box'>
+        <input type='password' name='pass' placeholder='输入WIFI密码' class='search-box'>
+        <input type='appid' name='appid' placeholder='输入讯飞Appid' class='search-box'>
+        <input type='apikey' name='apikey' placeholder='输入讯飞ApiKey' class='search-box'>
+        <input type='apisecret' name='apisecret' placeholder='输入讯飞ApiSecret' class='search-box'>
+        <input type='ttsapikey' name='ttsapikey' placeholder='输入万码云apikey' class='search-box'>
+        <input type='api' name='api' placeholder='输入心知天气API密钥' class='search-box'>
+        <input type='city' name='city' placeholder='输入城市拼音小写' class='search-box'>
+        <input type='submit'  style="height: 50px;width: 320px"  class='button'  value="保存">
+        <a href="https://lceda.cn/">
+            <table class="container button" style="height: 200px">
+                <tr>
+                    <th>设备名称:</th>
+                    <td>EDA-Robot</td>
+                </tr>
+                <tr>
+                    <th>内存大小:</th>
+                    <td>4MB</td>
+                </tr>
+                <tr>
+                    <th>控制台版本:</th>
+                    <td>V1.0</td>
+                </tr>
+                <tr>
+                    <th>官网:</th>
+                    <td> <a href="https://lceda.cn/">嘉立创EDA</a></td>
+                </tr>
+
+            </table>
+        </a>
+    </div>
+</form>
+</body>
+</html>
