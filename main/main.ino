@@ -5,30 +5,7 @@
 #include <WebServer.h>
 #include <SPIFFS.h>
 #include <ArduinoJson.h>
-
-
-const char* ssid = "AIWifi";
-const char* password = "";
-
-// wifi账号密码还有http本地服务器
-// const char* ssid = "zls";             // <-- 修改为你的 WiFi 名称
-// const char* password = "kuci@biluo";  // <-- 修改为你的 WiFi 密码
-WebServer server(8080);
-const char* configFile = "/config.json";
-
-// 读取配置
-String appKey = "";
-
-
-// 使用 I2C 初始化，适配你的 OLED 屏幕
-// U8G2_SSD1306_128X32_UNIVISION_F_HW_I2C  u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
-U8G2_SSD1306_128X32_UNIVISION_F_HW_I2C u8g2(U8G2_R0, /* reset=*/U8X8_PIN_NONE, /* SCL=*/5, /* SDA=*/4);
-
-
-// 录音按钮D3
-const int BUTTON_PIN = 18;
-bool lastButtonState = HIGH;
-bool currentButtonState = HIGH;
+#include <mbedtls/base64.h>
 
 
 // 麦克风 INMP441 (I2S 输入)
@@ -36,16 +13,46 @@ bool currentButtonState = HIGH;
 #define I2S_MIC_WS 16
 #define I2S_MIC_SD 17
 
+// 扬声器
+#define I2S_SPK_BCLK 12
+#define I2S_SPK_WS 11
+#define I2S_SPK_DIN 13
+
+// 麦克风采样参数
 #define SAMPLE_RATE 16000
 #define I2S_SAMPLE_BITS 16
 #define RECORD_SECONDS 5  // 可设为 30
 #define RECORD_BUFFER_SIZE (SAMPLE_RATE * RECORD_SECONDS)
 
 
-// 扬声器
-#define I2S_SPK_BCLK 12
-#define I2S_SPK_WS 11
-#define I2S_SPK_DIN 13
+const char* ssid = "AIWifi";
+const char* password = "";
+
+// Wifi配置
+WebServer server(8080);
+const char* configFile = "/config.json";
+
+// 系统配置
+String wcodeAppKey = "";
+// 科大讯飞（语音转文字）API相关
+const char* speechHost = "iat-api.xfyun.cn";
+const char* speechPath = "/v2/iat";
+WebsocketsClient wsSpeech;  // 用于语音转文字
+
+
+
+// OLED屏幕
+U8G2_SSD1306_128X32_UNIVISION_F_HW_I2C u8g2(U8G2_R0, /* reset=*/U8X8_PIN_NONE, /* SCL=*/5, /* SDA=*/4);
+
+
+
+
+
+// 录音参数
+const int BUTTON_PIN_1 = 18;
+bool lastButtonState = HIGH;
+bool currentButtonState = HIGH;
+
 
 // 收音的部分参数
 int16_t* recordedSamples = nullptr;
@@ -64,13 +71,13 @@ void loadConfig() {
   }
   File file = SPIFFS.open(configFile, "r");
   if (!file) {
-    sendMsg("", "请先通过热点配置文件");
+    sendMsg("请先链接热点配置系统", "http://192.168.4.1:8080/");
     return;
   }
   DynamicJsonDocument doc(2048);
   DeserializationError error = deserializeJson(doc, file);
   if (error) {
-    sendMsg("", "配置文件异常!");
+    sendMsg("请先链接热点配置系统", "http://192.168.4.1:8080/");
     file.close();
     return;
   }
@@ -111,7 +118,8 @@ void loadConfig() {
 
 // 初始化按钮
 void initButton() {
-  pinMode(BUTTON_PIN, INPUT_PULLUP);  // 使用内部上拉
+  // 使用内部上拉
+  pinMode(BUTTON_PIN_1, INPUT_PULLUP);
   Serial.println("initButton finished");
 }
 // 初始化 I2S 麦克风
@@ -228,6 +236,28 @@ void setup() {
 }
 
 
+// 按键处理函数
+void handleButtonPress(int button, bool& lastState, bool currentState, int buttonID) {
+  if (lastState == HIGH && currentState == LOW) {
+    Serial.printf("BUTTON_%d 按键按下\n", buttonID);
+    // connectWebSocket();
+    // if (!isRecording) {
+    //   startRecording();
+    // }
+    BTNow = buttonID;
+    isTalkingDisplayActive = true;
+  }
+  if (lastState == LOW && currentState == HIGH) {
+    Serial.printf("BUTTON_%d 按键松开\n", buttonID);
+    // if (isRecording) {
+    //   stopRecording();
+    // }
+    isTalkingDisplayActive = false;
+    currentState = 2;
+    displayTaskHandle = NULL;
+  }
+  lastState = currentState;
+}
 
 
 
@@ -239,35 +269,16 @@ void playAudio() {
 
 void initListener() {
 
-  bool btnState = digitalRead(BUTTON_PIN) == LOW;  // 是否按下
-
-  // 按下。并且之前没有开始录音的时候
-  if (btnState && !isRecording) {
-    // isRecording = true;
-    // memset(recordedSamples, 0, RECORD_BUFFER_SIZE * sizeof(int16_t));
-    // totalRead = 0;
-    // totalBytesRecorded = 0;
-    // sendMsg("录音中...");
-    // Serial.println("录音开始");
-  }
-
-  // // 持续采样
-  // if (isRecording) {
-
-  //   size_t bytesRead = 0;
-
-  //   while (digitalRead(BUTTON_PIN) == LOW && totalRead < RECORD_BUFFER_SIZE * 2) {
-  //     i2s_read(I2S_NUM_0, recordedSamples + totalRead / 2, 1024, &bytesRead, portMAX_DELAY);
-  //     totalRead += bytesRead;
-  //   }
-  //   isRecording = false;
-  //   totalBytesRecorded = totalRead;  // 保存有效录音字节数
-  //   sendMsg("录音完成，正在播放...");
-  //   playAudio();
-  // }
+  // 读取按键状态
+  static bool lastButtonMIDState = HIGH;
+  bool currentButtonMIDState = digitalRead(BUTTON_PIN_1);
+  handleButtonPress(BUTTON_PIN_1, lastButtonMIDState, currentButtonMIDState, 1);
 }
 
 void loop() {
+  // websocket持续接受消息
+  wsSpeech.poll();
+
   server.handleClient();  // 必须调用以处理HTTP请求
 
   // initListener();
@@ -299,4 +310,78 @@ void sendMsg(String msg1, String msg2) {
   lastMsg2 = msg2;
 
   u8g2.sendBuffer();
+}
+
+
+// 第一次握手
+void sendHandshake() {
+  currentState = 1;
+  DynamicJsonDocument jsonDoc(2048);
+  jsonDoc["common"]["app_id"] = appId;
+  jsonDoc["business"]["language"] = "zh_cn";
+  jsonDoc["business"]["domain"] = "iat";
+  jsonDoc["business"]["accent"] = "mandarin";
+  jsonDoc["business"]["vad_eos"] = 3000;
+  jsonDoc["data"]["status"] = 0;
+  jsonDoc["data"]["format"] = "audio/L16;rate=16000";
+  jsonDoc["data"]["encoding"] = "raw";
+  char buf[512];
+  serializeJson(jsonDoc, buf);
+  wsSpeech.send(buf);
+  Serial.println("已发送语音握手数据");
+}
+
+// WebSocket 连接处理函数
+void connectWebSocket() {
+  if (wsSpeech.available()) {
+    wsSpeech.close();
+  }
+  String speechURL = generateSpeechAuthURL();
+  Serial.println("语音WS URL：" + speechURL);
+  wsSpeech.onMessage(onSpeechMessage);
+  wsSpeech.connect(speechURL);
+
+  // 等待 WebSocket 连接建立
+  unsigned long startTime = millis();
+  while (!wsSpeech.available() && millis() - startTime < 1000) {
+    delay(10);
+  }
+  sendHandshake();
+}
+
+// 生成科大讯飞语音转文字的鉴权URL
+String wsSpeechURL = "";
+String generateSpeechAuthURL() {
+  String date = getDate();
+  if (date == "")
+    return "";
+  String tmp = "host: " + String(speechHost) + "\n";
+  tmp += "date: " + date + "\n";
+  tmp += "GET " + String(speechPath) + " HTTP/1.1";
+  String signature = hmacSHA256(apiSecret, tmp);
+  String authOrigin = "api_key=\"" + String(apiKey) + "\", algorithm=\"hmac-sha256\", headers=\"host date request-line\", signature=\"" + signature + "\"";
+  unsigned char authBase64[256] = { 0 };
+  size_t authLen = 0;
+  int ret = mbedtls_base64_encode(authBase64, sizeof(authBase64) - 1, &authLen, (const unsigned char*)authOrigin.c_str(), authOrigin.length());
+  if (ret != 0)
+    return "";
+  String authorization = String((char*)authBase64);
+  String encodedDate = "";
+  for (int i = 0; i < date.length(); i++) {
+    char c = date.charAt(i);
+    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+      encodedDate += c;
+    } else if (c == ' ') {
+      encodedDate += "+";
+    } else if (c == ',') {
+      encodedDate += "%2C";
+    } else if (c == ':') {
+      encodedDate += "%3A";
+    } else {
+      encodedDate += "%" + String(c, HEX);
+    }
+  }
+  String url = "ws://" + String(speechHost) + String(speechPath) + "?authorization=" + authorization + "&date=" + encodedDate + "&host=" + speechHost;
+  wsSpeechURL = url;
+  return url;
 }
