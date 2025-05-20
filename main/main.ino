@@ -6,7 +6,7 @@
 #include <SPIFFS.h>
 #include <ArduinoJson.h>
 #include <mbedtls/base64.h>
-// #include <WebSocketsClient.h>  // 注意大小写
+#include <WebSocketsClient.h>  // 注意大小写
 
 
 // 麦克风 INMP441 (I2S 输入)
@@ -27,7 +27,7 @@
 
 // 按钮
 #define BUTTON_PIN_1 18
-int BTNow = 0;
+bool buttonLastState1 = HIGH;
 
 
 const char* ssid = "AIWifi";
@@ -37,12 +37,10 @@ const char* password = "";
 WebServer server(8080);
 const char* configFile = "/config.json";
 
-// 系统配置
-String wcodeAppKey = "";
 // 科大讯飞（语音转文字）API相关
 const char* speechHost = "iat-api.xfyun.cn";
 const char* speechPath = "/v2/iat";
-// WebsocketsClient wsSpeech;  // 用于语音转文字
+WebSocketsClient wsSpeech;  // 用于语音转文字
 
 
 // 首页的网页
@@ -146,11 +144,6 @@ U8G2_SSD1306_128X32_UNIVISION_F_HW_I2C u8g2(U8G2_R0, /* reset=*/U8X8_PIN_NONE, /
 
 
 
-// 录音参数
-bool lastButtonState = HIGH;
-bool currentButtonState = HIGH;
-
-
 // 收音的部分参数
 int16_t* recordedSamples = nullptr;
 size_t totalBytesRecorded = 0;
@@ -161,22 +154,22 @@ size_t totalRead = 0;  // 全局，记录当前录音数据字节数
 
 
 // 从 SPIFFS 加载配置
-void loadConfig() {
+bool loadConfig() {
   if (!SPIFFS.begin(true)) {
     sendMsg("", "SPIFFS 初始化失败");
-    return;
+    return false;
   }
   File file = SPIFFS.open(configFile, "r");
   if (!file) {
     sendMsg("请先链接热点配置系统", "http://192.168.4.1:8080/");
-    return;
+    return false;
   }
   DynamicJsonDocument doc(2048);
   DeserializationError error = deserializeJson(doc, file);
   if (error) {
     sendMsg("请先链接热点配置系统", "http://192.168.4.1:8080/");
     file.close();
-    return;
+    return false;
   }
   // 读取数据，并且转换成 SystemConfig 结构体
   globalConfig.ssid = doc["ssid"].as<String>();
@@ -185,14 +178,22 @@ void loadConfig() {
   globalConfig.apikey = doc["apikey"].as<String>();
   globalConfig.apisecret = doc["apisecret"].as<String>();
   globalConfig.ttsapikey = doc["ttsapikey"].as<String>();
+  // 空数据的时候
+  if (globalConfig.ssid == "" || globalConfig.pass == "") {
+    sendMsg("请先链接热点配置系统", "http://192.168.4.1:8080/");
+    file.close();
+    return false;
+  }
   // 关闭文件
   file.close();
+  return true;
 }
 
 // 初始化按钮
 void initButton() {
   // 使用内部上拉
   pinMode(BUTTON_PIN_1, INPUT_PULLUP);
+  buttonLastState1 = HIGH;
   Serial.println("initButton finished");
 }
 // 初始化 I2S 麦克风
@@ -309,47 +310,30 @@ void initServer() {
 
 
 
-
-
-// 按键处理函数
-void handleButtonPress(int button, bool& lastState, bool currentState, int buttonID) {
+void listenButtonEvent(uint8_t pin, bool &lastState, void (*onPress)(), void (*onRelease)()) {
+  bool currentState = digitalRead(pin);
+  // 检测按下事件（HIGH -> LOW）
   if (lastState == HIGH && currentState == LOW) {
-    Serial.printf("BUTTON_%d 按键按下\n", buttonID);
-    // connectWebSocket();
-    // if (!isRecording) {
-    //   startRecording();
-    // }
-    BTNow = buttonID;
-    // isTalkingDisplayActive = true;
+    if (onPress) onPress();
   }
-  if (lastState == LOW && currentState == HIGH) {
-    Serial.printf("BUTTON_%d 按键松开\n", buttonID);
-    // if (isRecording) {
-    //   stopRecording();
-    // }
-    // isTalkingDisplayActive = false;
-    currentState = 2;
-    // displayTaskHandle = NULL;
+  // 检测释放事件（LOW -> HIGH）
+  else if (lastState == LOW && currentState == HIGH) {
+    if (onRelease) onRelease();
   }
+  // 更新状态
   lastState = currentState;
 }
 
-
-
-
-void playAudio() {
-
-  // sendMsg("播放完成");
+void handlePress1() {
+  sendMsg("","按钮1按下");
 }
 
+void handleRelease1() {
+  sendMsg("","按钮1松开");
+}
 
-
-void initListener() {
-
-  // 读取按键状态
-  static bool lastButtonMIDState = HIGH;
-  bool currentButtonMIDState = digitalRead(BUTTON_PIN_1);
-  handleButtonPress(BUTTON_PIN_1, lastButtonMIDState, currentButtonMIDState, 1);
+void initButtonListener() {
+  listenButtonEvent(BUTTON_PIN_1, buttonLastState1, handlePress1, handleRelease1);
 }
 
 void setup() {
@@ -358,7 +342,6 @@ void setup() {
   WiFi.mode(WIFI_OFF);
   delay(100);
   WiFi.mode(WIFI_AP);
-
 
   u8g2.begin();
   u8g2.enableUTF8Print();  // 启用 UTF-8 支持
@@ -373,25 +356,22 @@ void setup() {
     sendMsg("", "热点创建失败");
   }
   // 读取配置
-  loadConfig();
-
-  initServer();
-  initWifi();
-  initButton();
-  initI2SMic();
-  initI2SSpeaker();
-
-
-  Serial.println("系统启动");
+  bool status = loadConfig();
+  if (status) {
+    initServer();
+    initWifi();
+    initButton();
+    initI2SMic();
+    initI2SSpeaker();
+    Serial.println("系统启动");
+  } else {
+    Serial.println("系统尚未完成");
+  }
 }
 
 void loop() {
-  // websocket持续接受消息
-  // wsSpeech.poll();
-
-  server.handleClient();  // 必须调用以处理HTTP请求
-
-  // initListener();
+  server.handleClient();
+  initButtonListener();
 }
 
 String lastMsg1 = "";
