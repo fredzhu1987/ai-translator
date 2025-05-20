@@ -6,6 +6,7 @@
 #include <SPIFFS.h>
 #include <ArduinoJson.h>
 #include <mbedtls/base64.h>
+// #include <WebSocketsClient.h>  // 注意大小写
 
 
 // 麦克风 INMP441 (I2S 输入)
@@ -24,6 +25,10 @@
 #define RECORD_SECONDS 5  // 可设为 30
 #define RECORD_BUFFER_SIZE (SAMPLE_RATE * RECORD_SECONDS)
 
+// 按钮
+#define BUTTON_PIN_1 18
+int BTNow = 0;
+
 
 const char* ssid = "AIWifi";
 const char* password = "";
@@ -37,19 +42,111 @@ String wcodeAppKey = "";
 // 科大讯飞（语音转文字）API相关
 const char* speechHost = "iat-api.xfyun.cn";
 const char* speechPath = "/v2/iat";
-WebsocketsClient wsSpeech;  // 用于语音转文字
+// WebsocketsClient wsSpeech;  // 用于语音转文字
 
 
+// 首页的网页
+const char indexHtml[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+    <meta charset='UTF-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <title>AI Config</title>
+    <style>
+
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            text-align: center;
+        }
+
+        h1 {
+            text-align: center;
+        }
+
+        .button {
+            display: inline-block;
+            height: 30px;
+            width: 300px;
+            margin-top: 20px;
+
+            padding: 10px 20px;
+            background-color: deepskyblue;
+            color: #fff;
+            border: none;
+            border-radius: 20px; /* 添加圆角 */
+            text-decoration: none;
+            line-height: 2; /* 通过调整line-height的值来调整文字的垂直位置 */
+            text-align: center; /* 文字居中 */
+            box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.2); /* 添加立体感 */
+            transition: all 0.3s ease; /* 添加过渡效果 */
+        }
+
+        .button:hover {
+            background-color: skyblue; /* 鼠标悬停时的背景颜色 */
+            transform: translateY(2px); /* 点击效果 */
+            box-shadow: 2px 2px 8px rgba(0, 0, 0, 0.3); /* 添加更多立体感 */
+        }
+        .search-box {
+            margin-top: 20px;
+            display: inline-block;
+            height: 30px;
+            width: 300px;
+            padding: 5px 10px;
+            background-color: #f0f0f0;
+            border: 1px solid #ccc;
+            border-radius: 20px;
+            text-align: center; /* 文字居中 */
+        }
+        .hidden {
+            display: none; /* 初始隐藏 */
+        }
+    </style>
+
+</head>
+<body>
+<form action='/config' method='POST'>
+    <div class='container'>
+        <h1>设备配置页</h1>
+        <input type='text' name='ssid' placeholder='输入WIFI名称' class='search-box'>
+        <input type='text' name='pass' placeholder='输入WIFI密码' class='search-box'>
+        <input type='text' name='appid' placeholder='输入讯飞Appid' class='search-box'>
+        <input type='text' name='apikey' placeholder='输入讯飞ApiKey' class='search-box'>
+        <input type='text' name='apisecret' placeholder='输入讯飞ApiSecret' class='search-box'>
+        <input type='text' name='ttsapikey' placeholder='输入万码云apikey' class='search-box'>
+        <input type='submit'  style="height: 50px;width: 320px"  class='button'  value="保存">
+    </div>
+</form>
+</body>
+</html>
+)rawliteral";
+
+
+typedef struct {
+  String ssid;
+  String pass;
+  String appid;
+  String apikey;
+  String apisecret;
+  String ttsapikey;
+} SystemConfig;
+// 全局变量声明
+SystemConfig globalConfig;
 
 // OLED屏幕
 U8G2_SSD1306_128X32_UNIVISION_F_HW_I2C u8g2(U8G2_R0, /* reset=*/U8X8_PIN_NONE, /* SCL=*/5, /* SDA=*/4);
 
 
 
-
-
 // 录音参数
-const int BUTTON_PIN_1 = 18;
 bool lastButtonState = HIGH;
 bool currentButtonState = HIGH;
 
@@ -81,39 +178,15 @@ void loadConfig() {
     file.close();
     return;
   }
-
-  // String ssid = doc["ssid"] | "";
-  // String pass = doc["pass"] | "";
-  // appId = doc["appid"] | "";
-  // apiKey = doc["apikey"] | "";
-  // apiSecret = doc["apisecret"] | "";
-  // ttsApiKey = doc["ttsapikey"] | "";
-  // cityname = doc["city"] | "";
-  // weatherapi = doc["api"] | "";
-
-  // file.close();
-
-  // if (ssid == "" || pass == "") {
-  //   Serial.println("SSID 或密码为空，进入配网模式");
-  //   handleWiFiConfig();
-  //   return;
-  // }
-
-  // WiFi.begin(ssid.c_str(), pass.c_str());
-  // Serial.print("正在连接WiFi");
-
-  // unsigned long startAttemptTime = millis();
-  // while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 10000) {
-  //   delay(500);
-  //   Serial.print(".");
-  // }
-
-  // if (WiFi.status() == WL_CONNECTED) {
-  //   Serial.println("\nWiFi连接成功，IP地址: " + WiFi.localIP().toString());
-  // } else {
-  //   Serial.println("\nWiFi连接失败，进入配网模式");
-  //   handleWiFiConfig();
-  // }
+  // 读取数据，并且转换成 SystemConfig 结构体
+  globalConfig.ssid = doc["ssid"].as<String>();
+  globalConfig.pass = doc["pass"].as<String>();
+  globalConfig.appid = doc["appid"].as<String>();
+  globalConfig.apikey = doc["apikey"].as<String>();
+  globalConfig.apisecret = doc["apisecret"].as<String>();
+  globalConfig.ttsapikey = doc["ttsapikey"].as<String>();
+  // 关闭文件
+  file.close();
 }
 
 // 初始化按钮
@@ -173,35 +246,111 @@ void initI2SSpeaker() {
 }
 // 初始化wifi
 void initWifi() {
+  if (globalConfig.ssid.length() > 0 && globalConfig.pass.length() > 0) {
+    WiFi.begin(globalConfig.ssid.c_str(), globalConfig.pass.c_str());
+    sendMsg("正在连接WIFI", globalConfig.ssid);
+    // 等待WiFi连接，最多等待10秒
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+      delay(500);
+      attempts++;
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+      sendMsg("WIFI已连接", "IP: " + WiFi.localIP().toString());
+    } else {
+      sendMsg("WIFI连接失败", "请检查配置");
+    }
+  }
+  Serial.println("initWifi finished");
+}
+void initServer() {
   server.on("/config", HTTP_POST, []() {
-    String appkey = server.arg("appkey");
-    Serial.println("handleConfig appkey:" + appkey);
-    server.send(200, "text/plain", "OK");
-    Serial.println("config loaded");
+    // 获取表单数据
+    String ssid = server.arg("ssid");
+    String pass = server.arg("pass");
+    String appid = server.arg("appid");
+    String apikey = server.arg("apikey");
+    String apisecret = server.arg("apisecret");
+    String ttsapikey = server.arg("ttsapikey");
+    // 创建JSON文档
+    DynamicJsonDocument doc(2048);
+    doc["ssid"] = ssid;
+    doc["pass"] = pass;
+    doc["appid"] = appid;
+    doc["apikey"] = apikey;
+    doc["apisecret"] = apisecret;
+    doc["ttsapikey"] = ttsapikey;
+    // 保存到SPIFFS
+    File file = SPIFFS.open(configFile, "w");
+    if (!file) {
+      server.send(500, "text/plain", "保存失败");
+      return;
+    }
+    // 序列化JSON到文件
+    if (serializeJson(doc, file)) {
+      server.send(200, "text/plain", "配置已保存，设备将重启");
+      file.close();
+      delay(1000);
+      ESP.restart();
+    } else {
+      server.send(500, "text/plain", "保存失败");
+    }
+    Serial.println("config save done");
   });
   server.on("/", HTTP_GET, []() {
-    if (SPIFFS.exists("/index.html")) {
-      fs::File file = SPIFFS.open("/index.html", "r");
-      if (file) {
-        size_t fileSize = file.size();
-        String fileContent;
-        while (file.available()) {
-          fileContent += (char)file.read();
-        }
-        file.close();
-        server.send(200, "text/html", fileContent);
-        Serial.println("index loaded");
-        return;
-      }
-    }
-    Serial.println("index.html file not exist");
-    server.send(404, "text/plain", "File Not Found");
+    String html((__FlashStringHelper*)indexHtml);
+    server.send(200, "text/html", html);
+    Serial.println("index loaded");
   });
   server.begin();
   Serial.println("HTTP 服务器已启动，监听端口 8080");
-  Serial.println("initWifi finished");
+  Serial.println("initServer finished");
 }
 
+
+
+
+
+// 按键处理函数
+void handleButtonPress(int button, bool& lastState, bool currentState, int buttonID) {
+  if (lastState == HIGH && currentState == LOW) {
+    Serial.printf("BUTTON_%d 按键按下\n", buttonID);
+    // connectWebSocket();
+    // if (!isRecording) {
+    //   startRecording();
+    // }
+    BTNow = buttonID;
+    // isTalkingDisplayActive = true;
+  }
+  if (lastState == LOW && currentState == HIGH) {
+    Serial.printf("BUTTON_%d 按键松开\n", buttonID);
+    // if (isRecording) {
+    //   stopRecording();
+    // }
+    // isTalkingDisplayActive = false;
+    currentState = 2;
+    // displayTaskHandle = NULL;
+  }
+  lastState = currentState;
+}
+
+
+
+
+void playAudio() {
+
+  // sendMsg("播放完成");
+}
+
+
+
+void initListener() {
+
+  // 读取按键状态
+  static bool lastButtonMIDState = HIGH;
+  bool currentButtonMIDState = digitalRead(BUTTON_PIN_1);
+  handleButtonPress(BUTTON_PIN_1, lastButtonMIDState, currentButtonMIDState, 1);
+}
 
 void setup() {
   Serial.begin(115200);
@@ -226,6 +375,7 @@ void setup() {
   // 读取配置
   loadConfig();
 
+  initServer();
   initWifi();
   initButton();
   initI2SMic();
@@ -235,49 +385,9 @@ void setup() {
   Serial.println("系统启动");
 }
 
-
-// 按键处理函数
-void handleButtonPress(int button, bool& lastState, bool currentState, int buttonID) {
-  if (lastState == HIGH && currentState == LOW) {
-    Serial.printf("BUTTON_%d 按键按下\n", buttonID);
-    // connectWebSocket();
-    // if (!isRecording) {
-    //   startRecording();
-    // }
-    BTNow = buttonID;
-    isTalkingDisplayActive = true;
-  }
-  if (lastState == LOW && currentState == HIGH) {
-    Serial.printf("BUTTON_%d 按键松开\n", buttonID);
-    // if (isRecording) {
-    //   stopRecording();
-    // }
-    isTalkingDisplayActive = false;
-    currentState = 2;
-    displayTaskHandle = NULL;
-  }
-  lastState = currentState;
-}
-
-
-
-
-void playAudio() {
-
-  // sendMsg("播放完成");
-}
-
-void initListener() {
-
-  // 读取按键状态
-  static bool lastButtonMIDState = HIGH;
-  bool currentButtonMIDState = digitalRead(BUTTON_PIN_1);
-  handleButtonPress(BUTTON_PIN_1, lastButtonMIDState, currentButtonMIDState, 1);
-}
-
 void loop() {
   // websocket持续接受消息
-  wsSpeech.poll();
+  // wsSpeech.poll();
 
   server.handleClient();  // 必须调用以处理HTTP请求
 
@@ -314,74 +424,74 @@ void sendMsg(String msg1, String msg2) {
 
 
 // 第一次握手
-void sendHandshake() {
-  currentState = 1;
-  DynamicJsonDocument jsonDoc(2048);
-  jsonDoc["common"]["app_id"] = appId;
-  jsonDoc["business"]["language"] = "zh_cn";
-  jsonDoc["business"]["domain"] = "iat";
-  jsonDoc["business"]["accent"] = "mandarin";
-  jsonDoc["business"]["vad_eos"] = 3000;
-  jsonDoc["data"]["status"] = 0;
-  jsonDoc["data"]["format"] = "audio/L16;rate=16000";
-  jsonDoc["data"]["encoding"] = "raw";
-  char buf[512];
-  serializeJson(jsonDoc, buf);
-  wsSpeech.send(buf);
-  Serial.println("已发送语音握手数据");
-}
+// void sendHandshake() {
+//   currentState = 1;
+//   DynamicJsonDocument jsonDoc(2048);
+//   jsonDoc["common"]["app_id"] = appId;
+//   jsonDoc["business"]["language"] = "zh_cn";
+//   jsonDoc["business"]["domain"] = "iat";
+//   jsonDoc["business"]["accent"] = "mandarin";
+//   jsonDoc["business"]["vad_eos"] = 3000;
+//   jsonDoc["data"]["status"] = 0;
+//   jsonDoc["data"]["format"] = "audio/L16;rate=16000";
+//   jsonDoc["data"]["encoding"] = "raw";
+//   char buf[512];
+//   serializeJson(jsonDoc, buf);
+//   wsSpeech.send(buf);
+//   Serial.println("已发送语音握手数据");
+// }
 
-// WebSocket 连接处理函数
-void connectWebSocket() {
-  if (wsSpeech.available()) {
-    wsSpeech.close();
-  }
-  String speechURL = generateSpeechAuthURL();
-  Serial.println("语音WS URL：" + speechURL);
-  wsSpeech.onMessage(onSpeechMessage);
-  wsSpeech.connect(speechURL);
+// // WebSocket 连接处理函数
+// void connectWebSocket() {
+//   if (wsSpeech.available()) {
+//     wsSpeech.close();
+//   }
+//   String speechURL = generateSpeechAuthURL();
+//   Serial.println("语音WS URL：" + speechURL);
+//   wsSpeech.onMessage(onSpeechMessage);
+//   wsSpeech.connect(speechURL);
 
-  // 等待 WebSocket 连接建立
-  unsigned long startTime = millis();
-  while (!wsSpeech.available() && millis() - startTime < 1000) {
-    delay(10);
-  }
-  sendHandshake();
-}
+//   // 等待 WebSocket 连接建立
+//   unsigned long startTime = millis();
+//   while (!wsSpeech.available() && millis() - startTime < 1000) {
+//     delay(10);
+//   }
+//   sendHandshake();
+// }
 
-// 生成科大讯飞语音转文字的鉴权URL
-String wsSpeechURL = "";
-String generateSpeechAuthURL() {
-  String date = getDate();
-  if (date == "")
-    return "";
-  String tmp = "host: " + String(speechHost) + "\n";
-  tmp += "date: " + date + "\n";
-  tmp += "GET " + String(speechPath) + " HTTP/1.1";
-  String signature = hmacSHA256(apiSecret, tmp);
-  String authOrigin = "api_key=\"" + String(apiKey) + "\", algorithm=\"hmac-sha256\", headers=\"host date request-line\", signature=\"" + signature + "\"";
-  unsigned char authBase64[256] = { 0 };
-  size_t authLen = 0;
-  int ret = mbedtls_base64_encode(authBase64, sizeof(authBase64) - 1, &authLen, (const unsigned char*)authOrigin.c_str(), authOrigin.length());
-  if (ret != 0)
-    return "";
-  String authorization = String((char*)authBase64);
-  String encodedDate = "";
-  for (int i = 0; i < date.length(); i++) {
-    char c = date.charAt(i);
-    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
-      encodedDate += c;
-    } else if (c == ' ') {
-      encodedDate += "+";
-    } else if (c == ',') {
-      encodedDate += "%2C";
-    } else if (c == ':') {
-      encodedDate += "%3A";
-    } else {
-      encodedDate += "%" + String(c, HEX);
-    }
-  }
-  String url = "ws://" + String(speechHost) + String(speechPath) + "?authorization=" + authorization + "&date=" + encodedDate + "&host=" + speechHost;
-  wsSpeechURL = url;
-  return url;
-}
+// // 生成科大讯飞语音转文字的鉴权URL
+// String wsSpeechURL = "";
+// String generateSpeechAuthURL() {
+//   String date = getDate();
+//   if (date == "")
+//     return "";
+//   String tmp = "host: " + String(speechHost) + "\n";
+//   tmp += "date: " + date + "\n";
+//   tmp += "GET " + String(speechPath) + " HTTP/1.1";
+//   String signature = hmacSHA256(apiSecret, tmp);
+//   String authOrigin = "api_key=\"" + String(apiKey) + "\", algorithm=\"hmac-sha256\", headers=\"host date request-line\", signature=\"" + signature + "\"";
+//   unsigned char authBase64[256] = { 0 };
+//   size_t authLen = 0;
+//   int ret = mbedtls_base64_encode(authBase64, sizeof(authBase64) - 1, &authLen, (const unsigned char*)authOrigin.c_str(), authOrigin.length());
+//   if (ret != 0)
+//     return "";
+//   String authorization = String((char*)authBase64);
+//   String encodedDate = "";
+//   for (int i = 0; i < date.length(); i++) {
+//     char c = date.charAt(i);
+//     if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+//       encodedDate += c;
+//     } else if (c == ' ') {
+//       encodedDate += "+";
+//     } else if (c == ',') {
+//       encodedDate += "%2C";
+//     } else if (c == ':') {
+//       encodedDate += "%3A";
+//     } else {
+//       encodedDate += "%" + String(c, HEX);
+//     }
+//   }
+//   String url = "ws://" + String(speechHost) + String(speechPath) + "?authorization=" + authorization + "&date=" + encodedDate + "&host=" + speechHost;
+//   wsSpeechURL = url;
+//   return url;
+// }
