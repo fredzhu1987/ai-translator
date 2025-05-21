@@ -301,12 +301,12 @@ void initServer() {
     // 保存到SPIFFS
     File file = SPIFFS.open(configFile, "w");
     if (!file) {
-      server.send(500, "text/plain", "保存失败");
+      server.send(500, "text/plain", "Save fail");
       return;
     }
     // 序列化JSON到文件
     if (serializeJson(doc, file)) {
-      server.send(200, "text/plain", "配置已保存，设备将重启");
+      server.send(200, "text/plain", "Save success, Rebot system now!");
       file.close();
       delay(1000);
       ESP.restart();
@@ -329,6 +329,7 @@ void initServer() {
 
 void listenButtonEvent(uint8_t pin, bool& lastState, void (*onPress)(), void (*onRelease)()) {
   bool currentState = digitalRead(pin);
+  Serial.println("currentState=" + currentState);
   // 检测按下事件（HIGH -> LOW）
   if (lastState == HIGH && currentState == LOW) {
     if (onPress) onPress();
@@ -490,6 +491,7 @@ void initButtonListener() {
 
 void setup() {
   Serial.begin(115200);
+  while (!Serial) delay(10);  // 等待 USB CDC 就绪（ESP32-S3 特有）
 
 
   delay(1000);  // 等待串口稳定
@@ -528,7 +530,7 @@ void setup() {
 void loop() {
   server.handleClient();
   initButtonListener();
-  // wsSpeech.poll();  //持续消息接受
+  wsSpeech.poll();  //持续消息接受
 }
 
 String lastMsg1 = "";
