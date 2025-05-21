@@ -5,8 +5,15 @@
 #include <WebServer.h>
 #include <SPIFFS.h>
 #include <ArduinoJson.h>
+#include <mbedtls/md.h>
 #include <mbedtls/base64.h>
-#include <WebSocketsClient.h>  // 注意大小写
+#include <mbedtls/sha256.h>
+#include <ArduinoWebsockets.h>  //https://github.com/gilmaimon/ArduinoWebsockets
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+
+
+using namespace websockets;
 
 
 // 麦克风 INMP441 (I2S 输入)
@@ -16,7 +23,7 @@
 
 // 扬声器
 #define I2S_SPK_BCLK 12
-#define I2S_SPK_WS 11
+#define I2S_SPK_LRC 11
 #define I2S_SPK_DIN 13
 
 // 麦克风采样参数
@@ -28,6 +35,9 @@
 // 按钮
 #define BUTTON_PIN_1 18
 bool buttonLastState1 = HIGH;
+bool recording = false;        // 是否开启录音
+unsigned long startTimestamp;  //开始录制的时间
+
 
 
 const char* ssid = "AIWifi";
@@ -40,7 +50,11 @@ const char* configFile = "/config.json";
 // 科大讯飞（语音转文字）API相关
 const char* speechHost = "iat-api.xfyun.cn";
 const char* speechPath = "/v2/iat";
-WebSocketsClient wsSpeech;  // 用于语音转文字
+WebsocketsClient wsSpeech;  // 用于语音转文字
+
+// 时间ntp
+WiFiUDP udp;
+NTPClient timeClient(udp, "pool.ntp.org", 0, 60000);
 
 
 // 首页的网页
@@ -144,12 +158,13 @@ U8G2_SSD1306_128X32_UNIVISION_F_HW_I2C u8g2(U8G2_R0, /* reset=*/U8X8_PIN_NONE, /
 
 
 
-// 收音的部分参数
-int16_t* recordedSamples = nullptr;
-size_t totalBytesRecorded = 0;
-bool isRecording = false;
-unsigned long recordStartTime = 0;
-size_t totalRead = 0;  // 全局，记录当前录音数据字节数
+// 计时变量（音频发送）
+unsigned long startTime = 0;
+unsigned long lastSendTime = 0;
+unsigned long globalEpochTime = 0;
+// 状态标记及结果存储
+volatile bool isRecording = false;     // 当前是否正在录音
+volatile bool speechFinished = false;  // 语音识别结果是否返回（结束帧
 
 
 
@@ -199,28 +214,25 @@ void initButton() {
 // 初始化 I2S 麦克风
 void initI2SMic() {
   i2s_config_t i2s_config = {
-    .mode = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_RX),
+    .mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_RX),
     .sample_rate = SAMPLE_RATE,
     .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
     .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
-    .communication_format = I2S_COMM_FORMAT_I2S,
+    .communication_format = I2S_COMM_FORMAT_I2S_MSB,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
     .dma_buf_count = 4,
-    .dma_buf_len = 512,
-    .use_apll = false,
-    .tx_desc_auto_clear = true,
-    .fixed_mclk = 0
+    .dma_buf_len = 512
   };
 
-  i2s_pin_config_t pin_config = {
+  const i2s_pin_config_t inmp441_pin_config = {
     .bck_io_num = I2S_MIC_BCLK,
     .ws_io_num = I2S_MIC_WS,
     .data_out_num = I2S_PIN_NO_CHANGE,
     .data_in_num = I2S_MIC_SD
   };
-  i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
-  i2s_set_pin(I2S_NUM_0, &pin_config);
-  Serial.println("initI2SMic finished");
+  i2s_driver_install(I2S_NUM_1, &i2s_config, 0, NULL);
+  i2s_set_pin(I2S_NUM_1, &inmp441_pin_config);
+  i2s_zero_dma_buffer(I2S_NUM_1);
 }
 // 初始化 I2S 扬声器
 void initI2SSpeaker() {
@@ -237,12 +249,13 @@ void initI2SSpeaker() {
   };
   i2s_pin_config_t pin_config = {
     .bck_io_num = I2S_SPK_BCLK,
-    .ws_io_num = I2S_SPK_WS,
+    .ws_io_num = I2S_SPK_LRC,
     .data_out_num = I2S_SPK_DIN,
     .data_in_num = I2S_PIN_NO_CHANGE
   };
-  i2s_driver_install(I2S_NUM_1, &i2s_config, 0, NULL);
-  i2s_set_pin(I2S_NUM_1, &pin_config);
+  i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+  i2s_set_pin(I2S_NUM_0, &pin_config);
+
   Serial.println("initI2SSpeaker finished");
 }
 // 初始化wifi
@@ -264,6 +277,13 @@ void initWifi() {
   }
   Serial.println("initWifi finished");
 }
+
+void initNtp() {
+  timeClient.begin();
+  timeClient.update();  // 获取初始时间
+  Serial.println("initNtp finished");
+}
+
 void initServer() {
   server.on("/config", HTTP_POST, []() {
     // 获取表单数据
@@ -310,7 +330,7 @@ void initServer() {
 
 
 
-void listenButtonEvent(uint8_t pin, bool &lastState, void (*onPress)(), void (*onRelease)()) {
+void listenButtonEvent(uint8_t pin, bool& lastState, void (*onPress)(), void (*onRelease)()) {
   bool currentState = digitalRead(pin);
   // 检测按下事件（HIGH -> LOW）
   if (lastState == HIGH && currentState == LOW) {
@@ -324,12 +344,149 @@ void listenButtonEvent(uint8_t pin, bool &lastState, void (*onPress)(), void (*o
   lastState = currentState;
 }
 
+
+String getDate() {
+  time_t epochTime = timeClient.getEpochTime();
+  struct tm* ptm = gmtime(&epochTime);  // 转换为 GMT 时间
+  char timeString[40];
+  strftime(timeString, sizeof(timeString), "%a, %d %b %Y %H:%M:%S GMT", ptm);
+  return String(timeString);
+}
+
+String createAuthUrl() {
+  String date = getDate();
+  if (date == "")
+    return "";
+  String tmp = "host: " + String(speechHost) + "\n";
+  tmp += "date: " + date + "\n";
+  tmp += "GET " + String(speechPath) + " HTTP/1.1";
+  String signature = hmacSHA256(globalConfig.apisecret, tmp);
+  String authOrigin = "api_key=\"" + String(globalConfig.apikey) + "\", algorithm=\"hmac-sha256\", headers=\"host date request-line\", signature=\"" + signature + "\"";
+  unsigned char authBase64[256] = { 0 };
+  size_t authLen = 0;
+  int ret = mbedtls_base64_encode(authBase64, sizeof(authBase64) - 1, &authLen, (const unsigned char*)authOrigin.c_str(), authOrigin.length());
+  if (ret != 0)
+    return "";
+  String authorization = String((char*)authBase64);
+  String encodedDate = "";
+  for (int i = 0; i < date.length(); i++) {
+    char c = date.charAt(i);
+    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+      encodedDate += c;
+    } else if (c == ' ') {
+      encodedDate += "+";
+    } else if (c == ',') {
+      encodedDate += "%2C";
+    } else if (c == ':') {
+      encodedDate += "%3A";
+    } else {
+      encodedDate += "%" + String(c, HEX);
+    }
+  }
+  String url = "ws://" + String(speechHost) + String(speechPath) + "?authorization=" + authorization + "&date=" + encodedDate + "&host=" + speechHost;
+  Serial.println(url);
+  return url;
+}
+
+
+void connectToIFLY() {
+  String wsUrl = createAuthUrl();
+  wsSpeech.connect(wsUrl);
+  wsSpeech.onMessage([](WebsocketsMessage msg) {
+    Serial.println("返回内容: " + msg.data());
+  });
+  // 发个hi
+  DynamicJsonDocument jsonDoc(2048);
+  jsonDoc["common"]["app_id"] = globalConfig.appid;
+  jsonDoc["business"]["language"] = "zh_cn";
+  jsonDoc["business"]["domain"] = "iat";
+  jsonDoc["business"]["accent"] = "mandarin";
+  jsonDoc["business"]["vad_eos"] = 3000;
+  jsonDoc["data"]["status"] = 0;
+  jsonDoc["data"]["format"] = "audio/L16;rate=16000";
+  jsonDoc["data"]["encoding"] = "raw";
+  char buf[512];
+  serializeJson(jsonDoc, buf);
+  wsSpeech.send(buf);
+}
+
+void sendAudioData(bool firstFrame = false) {
+  unsigned int FRAME_SIZE = 1280;     // 16-bit PCM，每帧 1280B 对应 40ms
+  static uint8_t buffer[FRAME_SIZE];  // 音频数据缓冲区
+  size_t bytesRead = 0;
+  static unsigned long lastSendTime = 0;
+
+  unsigned long currentMillis = millis();
+
+  // 每40ms发送一次音频
+  if (currentMillis - lastSendTime < 40) {
+    return;  // 如果间隔不到40ms，不发送数据
+  }
+
+  lastSendTime = currentMillis;  // 更新发送时间
+
+  // 读取 I2S 音频数据
+  esp_err_t result = i2s_read(I2S_NUM_1, buffer, FRAME_SIZE, &bytesRead, portMAX_DELAY);
+  if (result != ESP_OK || bytesRead == 0) {
+    Serial.println("I2S Read Failed or No Data!");
+    return;
+  }
+
+  // Base64 编码
+  String base64Audio = base64Encode(buffer, bytesRead);
+  if (base64Audio.length() == 0) {
+    Serial.println("Base64 Encoding Failed!");
+    return;
+  }
+
+  // 发送 JSON 数据
+  DynamicJsonDocument jsonDoc(2048);
+  jsonDoc["data"]["status"] = firstFrame ? 0 : 1;  // 第一帧 status = 0，其他帧 status = 1
+  jsonDoc["data"]["format"] = "audio/L16;rate=16000";
+  jsonDoc["data"]["encoding"] = "raw";
+  jsonDoc["data"]["audio"] = base64Audio;  // 确保 Base64 编码成功
+
+  char jsonBuffer[2048];
+  serializeJson(jsonDoc, jsonBuffer);
+
+  wsSpeech.send(jsonBuffer);  // 发送音频数据
+  Serial.printf("Sent %d bytes, status: %d\n", bytesRead, firstFrame ? 0 : 1);
+}
+
+void startRecording() {
+  isRecording = true;
+  startTime = millis();
+  sendAudioData(true);
+}
+
+void stopRecording() {
+  isRecording = false;
+  // 发个bye
+  DynamicJsonDocument jsonDoc(2048);
+  jsonDoc["data"]["status"] = 2;  // 结束传输
+  char buf[128];
+  serializeJson(jsonDoc, buf);
+  if (!wsSpeech.send(buf)) {
+    // 失败逻辑
+  }
+  Serial.println("录音结束，已发送结束信号");
+}
+
 void handlePress1() {
-  sendMsg("","按钮1按下");
+  if (!recording) {
+    connectToIFLY();
+    if (!isRecording) {
+      startRecording();
+    }
+    sendMsg("", "开始语音识别");
+  }
 }
 
 void handleRelease1() {
-  sendMsg("","按钮1松开");
+  sendMsg("", "按钮1松开");
+  if (isRecording) {
+    stopRecording();
+  }
 }
 
 void initButtonListener() {
@@ -338,6 +495,8 @@ void initButtonListener() {
 
 void setup() {
   Serial.begin(115200);
+
+
   delay(1000);  // 等待串口稳定
   WiFi.mode(WIFI_OFF);
   delay(100);
@@ -355,14 +514,16 @@ void setup() {
   } else {
     sendMsg("", "热点创建失败");
   }
+
+  initButton();
+  initI2SMic();
+  initI2SSpeaker();
+  initServer();
   // 读取配置
   bool status = loadConfig();
   if (status) {
-    initServer();
     initWifi();
-    initButton();
-    initI2SMic();
-    initI2SSpeaker();
+    initNtp();
     Serial.println("系统启动");
   } else {
     Serial.println("系统尚未完成");
@@ -372,6 +533,7 @@ void setup() {
 void loop() {
   server.handleClient();
   initButtonListener();
+  // wsSpeech.poll();  //持续消息接受
 }
 
 String lastMsg1 = "";
@@ -403,75 +565,40 @@ void sendMsg(String msg1, String msg2) {
 }
 
 
-// 第一次握手
-// void sendHandshake() {
-//   currentState = 1;
-//   DynamicJsonDocument jsonDoc(2048);
-//   jsonDoc["common"]["app_id"] = appId;
-//   jsonDoc["business"]["language"] = "zh_cn";
-//   jsonDoc["business"]["domain"] = "iat";
-//   jsonDoc["business"]["accent"] = "mandarin";
-//   jsonDoc["business"]["vad_eos"] = 3000;
-//   jsonDoc["data"]["status"] = 0;
-//   jsonDoc["data"]["format"] = "audio/L16;rate=16000";
-//   jsonDoc["data"]["encoding"] = "raw";
-//   char buf[512];
-//   serializeJson(jsonDoc, buf);
-//   wsSpeech.send(buf);
-//   Serial.println("已发送语音握手数据");
-// }
+////////////////////////////
+// 工具函数：Base64、HMAC、时间格式转换等
+////////////////////////////
+String base64Encode(const uint8_t* data, size_t len) {
+  if (len == 0 || data == nullptr) {
+    Serial.println("Base64编码错误：无数据");
+    return "";
+  }
+  size_t outputLen = 0;
+  size_t bufSize = ((len + 2) / 3) * 4 + 1;
+  char* buf = (char*)malloc(bufSize);
+  if (!buf)
+    return "";
+  int ret = mbedtls_base64_encode((unsigned char*)buf, bufSize, &outputLen, data, len);
+  if (ret != 0) {
+    free(buf);
+    return "";
+  }
+  String encoded = String(buf);
+  free(buf);
+  return encoded;
+}
 
-// // WebSocket 连接处理函数
-// void connectWebSocket() {
-//   if (wsSpeech.available()) {
-//     wsSpeech.close();
-//   }
-//   String speechURL = generateSpeechAuthURL();
-//   Serial.println("语音WS URL：" + speechURL);
-//   wsSpeech.onMessage(onSpeechMessage);
-//   wsSpeech.connect(speechURL);
-
-//   // 等待 WebSocket 连接建立
-//   unsigned long startTime = millis();
-//   while (!wsSpeech.available() && millis() - startTime < 1000) {
-//     delay(10);
-//   }
-//   sendHandshake();
-// }
-
-// // 生成科大讯飞语音转文字的鉴权URL
-// String wsSpeechURL = "";
-// String generateSpeechAuthURL() {
-//   String date = getDate();
-//   if (date == "")
-//     return "";
-//   String tmp = "host: " + String(speechHost) + "\n";
-//   tmp += "date: " + date + "\n";
-//   tmp += "GET " + String(speechPath) + " HTTP/1.1";
-//   String signature = hmacSHA256(apiSecret, tmp);
-//   String authOrigin = "api_key=\"" + String(apiKey) + "\", algorithm=\"hmac-sha256\", headers=\"host date request-line\", signature=\"" + signature + "\"";
-//   unsigned char authBase64[256] = { 0 };
-//   size_t authLen = 0;
-//   int ret = mbedtls_base64_encode(authBase64, sizeof(authBase64) - 1, &authLen, (const unsigned char*)authOrigin.c_str(), authOrigin.length());
-//   if (ret != 0)
-//     return "";
-//   String authorization = String((char*)authBase64);
-//   String encodedDate = "";
-//   for (int i = 0; i < date.length(); i++) {
-//     char c = date.charAt(i);
-//     if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
-//       encodedDate += c;
-//     } else if (c == ' ') {
-//       encodedDate += "+";
-//     } else if (c == ',') {
-//       encodedDate += "%2C";
-//     } else if (c == ':') {
-//       encodedDate += "%3A";
-//     } else {
-//       encodedDate += "%" + String(c, HEX);
-//     }
-//   }
-//   String url = "ws://" + String(speechHost) + String(speechPath) + "?authorization=" + authorization + "&date=" + encodedDate + "&host=" + speechHost;
-//   wsSpeechURL = url;
-//   return url;
-// }
+String hmacSHA256(const String& key, const String& data) {
+  unsigned char hmacResult[32];
+  mbedtls_md_context_t ctx;
+  mbedtls_md_init(&ctx);
+  mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), 1);
+  mbedtls_md_hmac_starts(&ctx, (const unsigned char*)key.c_str(), key.length());
+  mbedtls_md_hmac_update(&ctx, (const unsigned char*)data.c_str(), data.length());
+  mbedtls_md_hmac_finish(&ctx, hmacResult);
+  mbedtls_md_free(&ctx);
+  size_t outLen;
+  unsigned char base64Result[64];
+  mbedtls_base64_encode(base64Result, sizeof(base64Result), &outLen, hmacResult, sizeof(hmacResult));
+  return String((char*)base64Result);
+}
