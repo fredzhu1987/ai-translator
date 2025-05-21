@@ -48,6 +48,7 @@ const char* configFile = "/config.json";
 const char* speechHost = "iat-api.xfyun.cn";
 const char* speechPath = "/v2/iat";
 WebsocketsClient wsSpeech;  // 用于语音转文字
+String speechText;
 
 // 时间ntp
 WiFiUDP udp;
@@ -196,6 +197,9 @@ bool loadConfig() {
     file.close();
     return false;
   }
+  Serial.printf("ssid=%s,pass=%s", globalConfig.ssid, globalConfig.pass);
+  Serial.printf("appid=%s,apikey=%s,apisecret=%s,ttsapikey=%s", globalConfig.appid, globalConfig.apikey, globalConfig.apisecret, globalConfig.ttsapikey);
+
   // 关闭文件
   file.close();
   return true;
@@ -329,7 +333,7 @@ void initServer() {
 
 void listenButtonEvent(uint8_t pin, bool& lastState, void (*onPress)(), void (*onRelease)()) {
   bool currentState = digitalRead(pin);
-  Serial.println("currentState=" + currentState);
+  // Serial.println("currentState=" + currentState);
   // 检测按下事件（HIGH -> LOW）
   if (lastState == HIGH && currentState == LOW) {
     if (onPress) onPress();
@@ -390,15 +394,43 @@ String createAuthUrl() {
 void connectToIFLY() {
   String wsUrl = createAuthUrl();
   wsSpeech.connect(wsUrl);
-  wsSpeech.onMessage([](WebsocketsMessage msg) {
-    Serial.println("返回内容: " + msg.data());
+  wsSpeech.onMessage([](WebsocketsMessage message) {
+    Serial.println("返回内容: " + message.data());
+    DynamicJsonDocument doc(2048);
+    DeserializationError err = deserializeJson(doc, message.data());
+    if (err.c_str() != "Ok") {
+      Serial.print("语音JSON解析错误：");
+      Serial.println(err.c_str());
+      sendMsg("语音解析错误", err.c_str());
+      return;
+    }
+    //拿出数据
+
+    String tempText = "";
+    if (doc.containsKey("data") && doc["data"].containsKey("result") && doc["data"]["result"].containsKey("ws")) {
+      for (JsonObject wsObj : doc["data"]["result"]["ws"].as<JsonArray>()) {
+        for (JsonObject cwObj : wsObj["cw"].as<JsonArray>()) {
+          tempText += cwObj["w"].as<String>() + " ";
+        }
+      }
+      tempText.trim();
+      speechText = tempText;
+      Serial.println("识别结果：" + speechText);
+    }
   });
+
+  // 等待 WebSocket 连接建立
+  unsigned long startTime = millis();
+  while (!wsSpeech.available() && millis() - startTime < 1000) {
+    delay(10);
+  }
+
   // 发个hi
   DynamicJsonDocument jsonDoc(2048);
   jsonDoc["common"]["app_id"] = globalConfig.appid;
   jsonDoc["business"]["language"] = "zh_cn";
-  jsonDoc["business"]["domain"] = "iat";
-  jsonDoc["business"]["accent"] = "mandarin";
+  jsonDoc["business"]["domain"] = "iat";       //iat：日常用语
+  jsonDoc["business"]["accent"] = "mandarin";  //mandarin：中文普通话、其他语种
   jsonDoc["business"]["vad_eos"] = 3000;
   jsonDoc["data"]["status"] = 0;
   jsonDoc["data"]["format"] = "audio/L16;rate=16000";
@@ -409,6 +441,7 @@ void connectToIFLY() {
 }
 
 void sendAudioData(bool firstFrame = false) {
+  Serial.println("sendAudioData");
   const int FRAME_SIZE = 1280;        // 16-bit PCM，每帧 1280B 对应 40ms
   static uint8_t buffer[FRAME_SIZE];  // 音频数据缓冲区
   size_t bytesRead = 0;
@@ -446,18 +479,23 @@ void sendAudioData(bool firstFrame = false) {
 
   char jsonBuffer[2048];
   serializeJson(jsonDoc, jsonBuffer);
+  Serial.printf("jsonBuffer %s", jsonBuffer);
 
   wsSpeech.send(jsonBuffer);  // 发送音频数据
   Serial.printf("Sent %d bytes, status: %d\n", bytesRead, firstFrame ? 0 : 1);
 }
 
 void startRecording() {
+  Serial.println("startRecording");
+
   isRecording = true;
   startTime = millis();
   sendAudioData(true);
 }
 
 void stopRecording() {
+  Serial.println("stopRecording");
+
   isRecording = false;
   // 发个bye
   DynamicJsonDocument jsonDoc(2048);
@@ -466,6 +504,7 @@ void stopRecording() {
   serializeJson(jsonDoc, buf);
   if (!wsSpeech.send(buf)) {
     // 失败逻辑
+    Serial.println("发送语音失败");
   }
   Serial.println("录音结束，已发送结束信号");
 }
