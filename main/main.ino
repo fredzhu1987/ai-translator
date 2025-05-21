@@ -35,11 +35,8 @@ using namespace websockets;
 // 按钮
 #define BUTTON_PIN_1 18
 bool buttonLastState1 = HIGH;
-bool recording = false;        // 是否开启录音
-unsigned long startTimestamp;  //开始录制的时间
 
-
-
+// AP账号和密码
 const char* ssid = "AIWifi";
 const char* password = "";
 
@@ -176,13 +173,13 @@ bool loadConfig() {
   }
   File file = SPIFFS.open(configFile, "r");
   if (!file) {
-    sendMsg("请先链接热点配置系统", "http://192.168.4.1:8080/");
+    sendMsg("系统文件不存在", "http://192.168.4.1:8080/");
     return false;
   }
   DynamicJsonDocument doc(2048);
   DeserializationError error = deserializeJson(doc, file);
   if (error) {
-    sendMsg("请先链接热点配置系统", "http://192.168.4.1:8080/");
+    sendMsg("系统文件未设置", "http://192.168.4.1:8080/");
     file.close();
     return false;
   }
@@ -411,7 +408,7 @@ void connectToIFLY() {
 }
 
 void sendAudioData(bool firstFrame = false) {
-  unsigned int FRAME_SIZE = 1280;     // 16-bit PCM，每帧 1280B 对应 40ms
+  const int FRAME_SIZE = 1280;        // 16-bit PCM，每帧 1280B 对应 40ms
   static uint8_t buffer[FRAME_SIZE];  // 音频数据缓冲区
   size_t bytesRead = 0;
   static unsigned long lastSendTime = 0;
@@ -473,20 +470,18 @@ void stopRecording() {
 }
 
 void handlePress1() {
-  if (!recording) {
+  sendMsg("", "开始语音识别:" + isRecording);
+  if (!isRecording) {
     connectToIFLY();
-    if (!isRecording) {
-      startRecording();
-    }
-    sendMsg("", "开始语音识别");
+    startRecording();
   }
 }
 
 void handleRelease1() {
-  sendMsg("", "按钮1松开");
   if (isRecording) {
     stopRecording();
   }
+  sendMsg("", "按钮1松开:" + isRecording);
 }
 
 void initButtonListener() {
