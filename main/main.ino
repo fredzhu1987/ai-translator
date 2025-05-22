@@ -51,6 +51,7 @@ const char* configFile = "/config.json";
 
 WebsocketsClient wsSpeech;  // 用于语音转文字
 WebsocketsClient wsChat;    // 用于大模型对话
+WebsocketsClient wsTTS;     // 用于tts转语音
 
 // 科大讯飞（语音转文字）API相关
 const char* speechHost = "iat-api.xfyun.cn";
@@ -58,6 +59,10 @@ const char* speechPath = "/v2/iat";
 // 讯飞大模型
 const char* chatHost = "spark-api.xf-yun.com";
 const char* chatPath = "/v4.0/chat";
+// 讯飞语音合成
+const char* ttsHost = "tts-api.xfyun.cn";
+const char* ttsPath = "/v2/tts";
+
 // 文本转换tts
 const char* ttsApiUrl = "https://wcode.net/api/audio/gpt/text-to-audio/v3/transcription";
 
@@ -368,17 +373,16 @@ void connectToIFLY() {
   String wsUrl = createAuthUrl();
   wsSpeech.connect(wsUrl);
   wsSpeech.onMessage([](WebsocketsMessage message) {
-    Serial.println("TTS返回内容: " + message.data());
+    Serial.println("[tts2text]返回内容: " + message.data());
     DynamicJsonDocument doc(2048);
     DeserializationError err = deserializeJson(doc, message.data());
     if (err.c_str() != "Ok") {
-      Serial.print("语音JSON解析错误：");
+      Serial.print("[tts2text]SON解析错误：");
       Serial.println(err.c_str());
       sendMsg("语音解析错误", err.c_str());
       return;
     }
     //拿出数据
-
     String tempText = "";
     if (doc.containsKey("data") && doc["data"].containsKey("result") && doc["data"]["result"].containsKey("ws")) {
       for (JsonObject wsObj : doc["data"]["result"]["ws"].as<JsonArray>()) {
@@ -388,17 +392,16 @@ void connectToIFLY() {
       }
       tempText.trim();
       speechText = tempText;
-      speechText = "你好";
-      Serial.println("识别结果：" + speechText);
+      Serial.println("[tts2text]识别结果 tempText：" + tempText);
+      speechText = "你好英文怎么说";
+      Serial.println("[tts2text]识别结果 speechText：" + speechText);
     }
   });
-
   // 等待 WebSocket 连接建立
   unsigned long startTime = millis();
   while (!wsSpeech.available() && millis() - startTime < 1000) {
     delay(10);
   }
-
   // 发个hi
   DynamicJsonDocument jsonDoc(2048);
   jsonDoc["common"]["app_id"] = globalConfig.appid;
@@ -459,84 +462,51 @@ void sendAudioData(bool firstFrame = false) {
   Serial.printf("Sent %d bytes, status: %d\n", bytesRead, firstFrame ? 0 : 1);
 }
 
-void playTTS(String text) {
-  Serial.println("playTTS text:" + text);
-  HTTPClient http2;
+void sendTTSRequest(const String& text) {
   DynamicJsonDocument doc(2048);
-  doc["model"] = "cosyvoice-v2";
-  doc["text"] = text;
-
-  String postData;
-  serializeJson(doc, postData);
-
-  int maxRetries = 5;     // 最多重试 5 次
-  int retryDelay = 2000;  // 每次重试间隔 2 秒
-  int attempt = 0;
-  int httpCode;
-  String payload;
-
-  while (attempt < maxRetries) {
-    Serial.println("发送TTS请求 (尝试 " + String(attempt + 1) + " / " + String(maxRetries) + ")：" + postData);
-    http2.begin(ttsApiUrl);
-    http2.addHeader("Content-Type", "application/json");
-    http2.addHeader("Authorization", String("Bearer ") + globalConfig.ttsapikey);
-    httpCode = http2.POST(postData);
-    if (httpCode == HTTP_CODE_OK) {
-      payload = http2.getString();
-      Serial.println("TTS响应: " + payload);
-      break;  // 请求成功，跳出循环
-    } else {
-      Serial.println("TTS请求失败，错误码：" + String(httpCode));
-      attempt++;
-      if (attempt < maxRetries) {
-        Serial.println("等待 " + String(retryDelay / 1000) + " 秒后重试...");
-        delay(retryDelay);
-      }
-    }
-    http2.end();
-  }
-  if (httpCode != HTTP_CODE_OK) {
-    Serial.println("TTS请求多次失败，放弃！");
-    sendMsg("系统出错", "TTS请求失败");
-    return;
-  }
-  // 解析 JSON 并获取音频 URL
-  DynamicJsonDocument docResp(2048);
-  DeserializationError err = deserializeJson(docResp, payload);
-  if (err.c_str() != "Ok") {
-    Serial.print("TTS JSON解析错误：");
-    Serial.println(err.c_str());
-    sendMsg("系统出错", "TTS返回错误");
-    return;
-  }
-
-  String audioUrl;
-  for (int i = 0; i < 10; i++)  // 最多等待 10 次
-  {
-    audioUrl = docResp["data"]["result"]["audio_file_temp_url"].as<String>();
-    if (!audioUrl.isEmpty())
-      break;
-    delay(1000);
-    Serial.println("等待音频生成中...");
-  }
-  if (!audioUrl.isEmpty()) {
-    Serial.println("播放音频URL: " + audioUrl);
-    lastAudioUrl = audioUrl;  //后续重放用
-    wsSpeech.close();
-    wsChat.close();
-    delay(100);
-    // audio.connecttohost(audioUrl.c_str());
-    // mylcd.fillScreen(TFT_BLACK);
-    // mylcd.setTextSize(2);
-    // currentState = 3;
+  JsonObject common = doc.createNestedObject("common");
+  common["app_id"] = globalConfig.appid;
+  JsonObject business = doc.createNestedObject("business");
+  business["aue"] = "lame";
+  business["vcn"] = "xiaoyan";
+  business["pitch"] = 50;
+  business["speed"] = 50;
+  JsonObject data = doc.createNestedObject("data");
+  data["status"] = 2;
+  // TODO text转换成base64数据
+  // 使用mbedtls的base64编码替换原来的代码
+  size_t outputLen;
+  unsigned char* buffer = (unsigned char*)malloc(text.length() * 2);  // 确保足够的空间
+  mbedtls_base64_encode(buffer, text.length() * 2, &outputLen,
+                        (const unsigned char*)text.c_str(), text.length());
+  data["text"] = String((char*)buffer);
+  free(buffer);
+  // data["text"] = ;
+  String output;
+  serializeJson(doc, output);
+  if (!wsTTS.send(output)) {
+    Serial.println("[tts]数据发送失败");
   } else {
-    Serial.println("TTS生成失败，未获取到音频URL！");
+    Serial.println("[tts]数据发送成功");
   }
-  // mylcd.fillScreen(TFT_BLACK);
-  // mylcd.setTextSize(2);
-  // minuteTimerExpired = true;
 }
 
+void playTTS(String text) {
+  if (!wsTTS.available()) {
+    String ttsURL = generateTTsAuthURL();
+    Serial.println("[TTS]连接 URL：" + ttsURL);
+    wsTTS.onMessage([](WebsocketsMessage message) {
+      Serial.println("[TTS]返回内容: " + message.data());
+    });
+    wsTTS.connect(ttsURL);
+    unsigned long startTime = millis();
+    while (!wsTTS.available() && millis() - startTime < 1000) {
+      delay(10);
+    }
+  }
+  Serial.println("[TTS]连接成功");
+  sendTTSRequest(speechText);
+}
 
 void sendChatRequest(const String& userInput) {
   DynamicJsonDocument doc(2048);
@@ -560,11 +530,11 @@ void sendChatRequest(const String& userInput) {
   userMsg["content"] = userInput;
   String output;
   serializeJson(doc, output);
-  wsChat.send(output);
   if (!wsChat.send(output)) {
-    Serial.println("大模型数据发送失败");
+    Serial.println("[chat]大模型数据发送失败");
+  } else {
+    Serial.println("[chat]发送大模型对话请求，内容：" + output);
   }
-  Serial.println("发送大模型对话请求，内容：" + output);
 }
 
 void processChatResult() {
@@ -578,13 +548,13 @@ void processSpeechResult() {
   Serial.println("processSpeechResult speechText=" + speechText);
   if (!wsChat.available()) {
     String chatURL = generateChatAuthURL();
-    Serial.println("大模型对话WS URL：" + chatURL);
+    Serial.println("[chat]大模型对话WS URL：" + chatURL);
     wsChat.onMessage([](WebsocketsMessage message) {
-      Serial.println("大模型返回内容: " + message.data());
+      Serial.println("[chat]大模型返回内容: " + message.data());
       DynamicJsonDocument doc(2048);
       DeserializationError err = deserializeJson(doc, message.data());
       if (err.c_str() != "Ok") {
-        Serial.print("大模型JSON解析错误：");
+        Serial.print("[chat]大模型JSON解析错误：");
         Serial.println(err.c_str());
         return;
       }
@@ -602,11 +572,11 @@ void processSpeechResult() {
         // 更新最后一次收到回复的时间，并重置最终标志
         // lastChatMsgTime = millis();
         // chatFinalized = false;
-        Serial.println("当前累计回复：" + chatAggregated);
-        String filteredText = removeNonUTF8(chatAggregated);
-        playTTS(filteredText);
+        Serial.println("[chat]当前累计回复：" + chatAggregated);
+        // String filteredText = removeNonUTF8(chatAggregated);
+        playTTS(chatAggregated);
       } else {
-        Serial.println("大模型请求失败，错误码：" + String(code));
+        Serial.println("[chat]请求失败，错误码：" + String(code));
       }
     });
     wsChat.connect(chatURL);
@@ -614,7 +584,7 @@ void processSpeechResult() {
     while (!wsChat.available() && millis() - startTime < 1000) {
       delay(10);
     }
-    Serial.println("大模型连接成功");
+    Serial.println("[chat]连接成功");
     sendChatRequest(speechText);
   }
   speechText = "";
@@ -705,6 +675,7 @@ void loop() {
   initButtonListener();
   wsSpeech.poll();  //持续消息接受
   wsChat.poll();
+  wsTTS.poll();
   processSpeechResult();
   processChatResult();
 }
@@ -736,8 +707,6 @@ void sendMsg(String msg1, String msg2) {
 
   u8g2.sendBuffer();
 }
-
-
 
 
 String createAuthUrl() {
@@ -775,6 +744,41 @@ String createAuthUrl() {
   return url;
 }
 
+
+
+String generateTTsAuthURL() {
+  String date = getDate();
+  if (date == "")
+    return "";
+  String tmp = "host: " + String(ttsHost) + "\n";
+  tmp += "date: " + date + "\n";
+  tmp += "GET " + String(ttsPath) + " HTTP/1.1";
+  String signature = hmacSHA256(globalConfig.apisecret, tmp);
+  String authOrigin = "api_key=\"" + String(globalConfig.apikey) + "\", algorithm=\"hmac-sha256\", headers=\"host date request-line\", signature=\"" + signature + "\"";
+  unsigned char authBase64[256] = { 0 };
+  size_t authLen = 0;
+  int ret = mbedtls_base64_encode(authBase64, sizeof(authBase64) - 1, &authLen, (const unsigned char*)authOrigin.c_str(), authOrigin.length());
+  if (ret != 0)
+    return "";
+  String authorization = String((char*)authBase64);
+  String encodedDate = "";
+  for (int i = 0; i < date.length(); i++) {
+    char c = date.charAt(i);
+    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+      encodedDate += c;
+    } else if (c == ' ') {
+      encodedDate += "+";
+    } else if (c == ',') {
+      encodedDate += "%2C";
+    } else if (c == ':') {
+      encodedDate += "%3A";
+    } else {
+      encodedDate += "%" + String(c, HEX);
+    }
+  }
+  String url = "ws://" + String(chatHost) + String(chatPath) + "?authorization=" + authorization + "&date=" + encodedDate + "&host=" + chatHost;
+  return url;
+}
 
 String generateChatAuthURL() {
   String date = getDate();
