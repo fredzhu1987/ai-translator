@@ -58,10 +58,14 @@ const char* speechPath = "/v2/iat";
 // 讯飞大模型
 const char* chatHost = "spark-api.xf-yun.com";
 const char* chatPath = "/v4.0/chat";
+// 文本转换tts
+const char* ttsApiUrl = "https://wcode.net/api/audio/gpt/text-to-audio/v3/transcription";
+
 
 String speechText;                  //tts返回的用户输入语音
 String chatAggregated;              //累计大模型返回的文字
 unsigned long lastChatMsgTime = 0;  //最后大模型的时间，计算下间隔以后在播放
+
 
 
 // 计时变量（音频发送）
@@ -455,6 +459,83 @@ void sendAudioData(bool firstFrame = false) {
   Serial.printf("Sent %d bytes, status: %d\n", bytesRead, firstFrame ? 0 : 1);
 }
 
+void playTTS(String text) {
+  Serial.println("playTTS text:" + text);
+  HTTPClient http2;
+  DynamicJsonDocument doc(2048);
+  doc["model"] = "cosyvoice-v2";
+  doc["text"] = text;
+
+  String postData;
+  serializeJson(doc, postData);
+
+  int maxRetries = 5;     // 最多重试 5 次
+  int retryDelay = 2000;  // 每次重试间隔 2 秒
+  int attempt = 0;
+  int httpCode;
+  String payload;
+
+  while (attempt < maxRetries) {
+    Serial.println("发送TTS请求 (尝试 " + String(attempt + 1) + " / " + String(maxRetries) + ")：" + postData);
+    http2.begin(ttsApiUrl);
+    http2.addHeader("Content-Type", "application/json");
+    http2.addHeader("Authorization", String("Bearer ") + globalConfig.ttsapikey);
+    httpCode = http2.POST(postData);
+    if (httpCode == HTTP_CODE_OK) {
+      payload = http2.getString();
+      Serial.println("TTS响应: " + payload);
+      break;  // 请求成功，跳出循环
+    } else {
+      Serial.println("TTS请求失败，错误码：" + String(httpCode));
+      attempt++;
+      if (attempt < maxRetries) {
+        Serial.println("等待 " + String(retryDelay / 1000) + " 秒后重试...");
+        delay(retryDelay);
+      }
+    }
+    http2.end();
+  }
+  if (httpCode != HTTP_CODE_OK) {
+    Serial.println("TTS请求多次失败，放弃！");
+    sendMsg("系统出错", "TTS请求失败");
+    return;
+  }
+  // 解析 JSON 并获取音频 URL
+  DynamicJsonDocument docResp(2048);
+  DeserializationError err = deserializeJson(docResp, payload);
+  if (err.c_str() != "Ok") {
+    Serial.print("TTS JSON解析错误：");
+    Serial.println(err.c_str());
+    sendMsg("系统出错", "TTS返回错误");
+    return;
+  }
+
+  String audioUrl;
+  for (int i = 0; i < 10; i++)  // 最多等待 10 次
+  {
+    audioUrl = docResp["data"]["result"]["audio_file_temp_url"].as<String>();
+    if (!audioUrl.isEmpty())
+      break;
+    delay(1000);
+    Serial.println("等待音频生成中...");
+  }
+  if (!audioUrl.isEmpty()) {
+    Serial.println("播放音频URL: " + audioUrl);
+    wsSpeech.close();
+    wsChat.close();
+    delay(100);
+    // audio.connecttohost(audioUrl.c_str());
+    // mylcd.fillScreen(TFT_BLACK);
+    // mylcd.setTextSize(2);
+    // currentState = 3;
+  } else {
+    Serial.println("TTS生成失败，未获取到音频URL！");
+  }
+  // mylcd.fillScreen(TFT_BLACK);
+  // mylcd.setTextSize(2);
+  // minuteTimerExpired = true;
+}
+
 
 void sendChatRequest(const String& userInput) {
   DynamicJsonDocument doc(2048);
@@ -521,6 +602,8 @@ void processSpeechResult() {
         // lastChatMsgTime = millis();
         // chatFinalized = false;
         Serial.println("当前累计回复：" + chatAggregated);
+        String filteredText = removeNonUTF8(chatAggregated);
+        playTTS(filteredText);
       } else {
         Serial.println("大模型请求失败，错误码：" + String(code));
       }
@@ -769,4 +852,35 @@ String hmacSHA256(const String& key, const String& data) {
   unsigned char base64Result[64];
   mbedtls_base64_encode(base64Result, sizeof(base64Result), &outLen, hmacResult, sizeof(hmacResult));
   return String((char*)base64Result);
+}
+
+
+String removeNonUTF8(String chatAggregated) {
+  String result = "";
+  for (size_t i = 0; i < chatAggregated.length(); i++) {
+    uint8_t c = chatAggregated[i];  // 使用 uint8_t 来处理每个字节
+
+    // 检查英文字符
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+      result += (char)c;
+    }
+    // 检查数字
+    else if (c >= '0' && c <= '9') {
+      result += (char)c;
+    }
+    // 检查英文符号 “,” “.”
+    else if (c == ',' || c == '.') {
+      result += (char)c;
+    }
+    // 检查中文字符（UTF-8，3字节）
+    else if (i + 2 < chatAggregated.length() && (uint8_t)chatAggregated[i] >= 0xE4 && (uint8_t)chatAggregated[i] <= 0xE9) {  // 判断UTF-8中文起始字节范围
+      uint8_t c2 = (uint8_t)chatAggregated[i + 1];
+      uint8_t c3 = (uint8_t)chatAggregated[i + 2];
+      if (c2 >= 0x80 && c2 <= 0xBF && c3 >= 0x80 && c3 <= 0xBF) {
+        result += chatAggregated.substring(i, i + 3);
+        i += 2;  // 跳过后两个字节
+      }
+    }
+  }
+  return result;
 }
