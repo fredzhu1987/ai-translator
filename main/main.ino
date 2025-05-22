@@ -396,6 +396,7 @@ void connectToIFLY() {
       speechText = "你好英文怎么说";
       Serial.println("[tts2text]识别结果 speechText：" + speechText);
     }
+    wsSpeech.close();  //关闭连接
   });
   // 等待 WebSocket 连接建立
   unsigned long startTime = millis();
@@ -484,10 +485,11 @@ void sendTTSRequest(const String& text) {
   // data["text"] = ;
   String output;
   serializeJson(doc, output);
+  Serial.println("[TTS]数据发送,output:" + output);
   if (!wsTTS.send(output)) {
-    Serial.println("[tts]数据发送失败");
+    Serial.println("[TTS]数据发送失败");
   } else {
-    Serial.println("[tts]数据发送成功");
+    Serial.println("[TTS]数据发送成功");
   }
 }
 
@@ -530,10 +532,11 @@ void sendChatRequest(const String& userInput) {
   userMsg["content"] = userInput;
   String output;
   serializeJson(doc, output);
+  Serial.println("[chat]发送内容 output:" + output);
   if (!wsChat.send(output)) {
-    Serial.println("[chat]大模型数据发送失败");
+    Serial.println("[chat]数据发送失败");
   } else {
-    Serial.println("[chat]发送大模型对话请求，内容：" + output);
+    Serial.println("[chat]数据发送成功");
   }
 }
 
@@ -545,16 +548,16 @@ void processSpeechResult() {
   if (speechText == "" || isRecording) {
     return;
   }
-  Serial.println("processSpeechResult speechText=" + speechText);
+  Serial.println("[chat]speechText:" + speechText);
   if (!wsChat.available()) {
     String chatURL = generateChatAuthURL();
-    Serial.println("[chat]大模型对话WS URL：" + chatURL);
+    Serial.println("[chat]大模型对话WS URL:" + chatURL);
     wsChat.onMessage([](WebsocketsMessage message) {
-      Serial.println("[chat]大模型返回内容: " + message.data());
+      Serial.println("[chat]大模型返回内容:" + message.data());
       DynamicJsonDocument doc(2048);
       DeserializationError err = deserializeJson(doc, message.data());
       if (err.c_str() != "Ok") {
-        Serial.print("[chat]大模型JSON解析错误：");
+        Serial.print("[chat]大模型JSON解析错误:");
         Serial.println(err.c_str());
         return;
       }
@@ -569,11 +572,8 @@ void processSpeechResult() {
         } else {
           chatAggregated += content;
         }
-        // 更新最后一次收到回复的时间，并重置最终标志
-        // lastChatMsgTime = millis();
-        // chatFinalized = false;
         Serial.println("[chat]当前累计回复：" + chatAggregated);
-        // String filteredText = removeNonUTF8(chatAggregated);
+        wsChat.close();  //关闭连接
         playTTS(chatAggregated);
       } else {
         Serial.println("[chat]请求失败，错误码：" + String(code));
@@ -810,7 +810,7 @@ String generateChatAuthURL() {
       encodedDate += "%" + String(c, HEX);
     }
   }
-  String url = "ws://" + String(chatHost) + String(chatPath) + "?authorization=" + authorization + "&date=" + encodedDate + "&host=" + chatHost;
+  String url = "ws://" + String(ttsHost) + String(ttsPath) + "?authorization=" + authorization + "&date=" + encodedDate + "&host=" + chatHost;
   return url;
 }
 
