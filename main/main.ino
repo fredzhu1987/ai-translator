@@ -59,7 +59,11 @@ const char* speechPath = "/v2/iat";
 const char* chatHost = "spark-api.xf-yun.com";
 const char* chatPath = "/v4.0/chat";
 
-String speechText;
+String speechText;                  //tts返回的用户输入语音
+String chatAggregated;              //累计大模型返回的文字
+unsigned long lastChatMsgTime = 0;  //最后大模型的时间，计算下间隔以后在播放
+
+
 // 计时变量（音频发送）
 unsigned long startTime = 0;
 unsigned long lastSendTime = 0;
@@ -481,22 +485,53 @@ void sendChatRequest(const String& userInput) {
   Serial.println("已发送大模型对话请求，内容：" + userInput);
 }
 
+void processChatResult() {
+}
+
 void processSpeechResult() {
   // 没有录音，并且有结果的时候处理逻辑
   if (speechText == "" || isRecording) {
     return;
   }
+  Serial.println("processSpeechResult speechText=" + speechText);
   if (!wsChat.available()) {
     String chatURL = generateChatAuthURL();
     Serial.println("大模型对话WS URL：" + chatURL);
     wsChat.onMessage([](WebsocketsMessage message) {
       Serial.println("大模型返回内容: " + message.data());
+      DynamicJsonDocument doc(2048);
+      DeserializationError err = deserializeJson(doc, message.data());
+      if (err.c_str() != "Ok") {
+        Serial.print("大模型JSON解析错误：");
+        Serial.println(err.c_str());
+        return;
+      }
+      int code = doc["header"]["code"];
+      if (code == 0) {
+        // 提取当前回复内容和序号
+        int seq = doc["payload"]["choices"]["seq"];
+        String content = doc["payload"]["choices"]["text"][0]["content"].as<String>();
+        // 如果是第一条回复，直接赋值；否则在前面添加“，”再累加
+        if (seq == 0) {
+          chatAggregated = content;
+        } else {
+          chatAggregated += content;
+        }
+        // 更新最后一次收到回复的时间，并重置最终标志
+        // lastChatMsgTime = millis();
+        // chatFinalized = false;
+        Serial.println("当前累计回复：" + chatAggregated);
+      } else {
+        Serial.println("大模型请求失败，错误码：" + String(code));
+      }
     });
     wsChat.connect(chatURL);
     unsigned long startTime = millis();
     while (!wsChat.available() && millis() - startTime < 1000) {
       delay(10);
     }
+    Serial.println("大模型连接成功");
+    sendChatRequest(speechText);
   }
   speechText = "";
 }
@@ -511,7 +546,6 @@ void startRecording() {
 
 void stopRecording() {
   Serial.println("stopRecording");
-
   isRecording = false;
   // 发个bye
   DynamicJsonDocument jsonDoc(2048);
@@ -588,6 +622,7 @@ void loop() {
   wsSpeech.poll();  //持续消息接受
   wsChat.poll();
   processSpeechResult();
+  processChatResult();
 }
 
 String lastMsg1 = "";
