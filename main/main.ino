@@ -417,6 +417,7 @@ void connectToIFLY() {
   if (!connected) {
     Serial.println("[tts2text]Not Connected!");
   } else {
+    Serial.println("[tts2text]连接成功");
     wsSpeech.send(buf);
   }
 }
@@ -593,10 +594,10 @@ void processSpeechResult() {
     while (!wsChat.available() && millis() - startTime < 1000) {
       delay(10);
     }
-    Serial.println("[chat]连接成功");
     if (!connected) {
-      Serial.println("[TTS]Not Connected!");
+      Serial.println("[chat]Not Connected!");
     } else {
+      Serial.println("[chat]连接成功");
       sendChatRequest(speechText);
     }
   } else {
@@ -647,9 +648,13 @@ void initButtonListener() {
   listenButtonEvent(BUTTON_PIN_1, buttonLastState1, handlePress1, handleRelease1);
 }
 
-void displayTask(void *parameter) {
-  timeClient.update();
-  Serial.println("[task]displayTask");
+void displayTask(void* parameter) {
+  // 你的任务逻辑
+  for (;;) {
+    timeClient.update();
+    // Serial.println("[task]displayTask");
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  }
 }
 
 void setup() {
@@ -883,33 +888,3 @@ String hmacSHA256(const String& key, const String& data) {
 }
 
 
-String removeNonUTF8(String chatAggregated) {
-  return chatAggregated;
-  // String result = "";
-  // for (size_t i = 0; i < chatAggregated.length(); i++) {
-  //   uint8_t c = chatAggregated[i];  // 使用 uint8_t 来处理每个字节
-
-  //   // 检查英文字符
-  //   if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
-  //     result += (char)c;
-  //   }
-  //   // 检查数字
-  //   else if (c >= '0' && c <= '9') {
-  //     result += (char)c;
-  //   }
-  //   // 检查英文符号 “,” “.”
-  //   else if (c == ',' || c == '.') {
-  //     result += (char)c;
-  //   }
-  //   // 检查中文字符（UTF-8，3字节）
-  //   else if (i + 2 < chatAggregated.length() && (uint8_t)chatAggregated[i] >= 0xE4 && (uint8_t)chatAggregated[i] <= 0xE9) {  // 判断UTF-8中文起始字节范围
-  //     uint8_t c2 = (uint8_t)chatAggregated[i + 1];
-  //     uint8_t c3 = (uint8_t)chatAggregated[i + 2];
-  //     if (c2 >= 0x80 && c2 <= 0xBF && c3 >= 0x80 && c3 <= 0xBF) {
-  //       result += chatAggregated.substring(i, i + 3);
-  //       i += 2;  // 跳过后两个字节
-  //     }
-  //   }
-  // }
-  // return result;
-}
