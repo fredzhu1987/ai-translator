@@ -32,6 +32,11 @@ using namespace websockets;
 #define RECORD_SECONDS 5  // 可设为 30
 #define RECORD_BUFFER_SIZE (SAMPLE_RATE * RECORD_SECONDS)
 
+// oled
+#define OLED_SCL 5
+#define OLED_SDA 4
+
+
 // 按钮
 #define BUTTON_PIN_1 18
 bool buttonLastState1 = HIGH;
@@ -44,11 +49,25 @@ const char* password = "";
 WebServer server(8080);
 const char* configFile = "/config.json";
 
+WebsocketsClient wsSpeech;  // 用于语音转文字
+WebsocketsClient wsChat;    // 用于大模型对话
+
 // 科大讯飞（语音转文字）API相关
 const char* speechHost = "iat-api.xfyun.cn";
 const char* speechPath = "/v2/iat";
-WebsocketsClient wsSpeech;  // 用于语音转文字
+// 讯飞大模型
+const char* chatHost = "spark-api.xf-yun.com";
+const char* chatPath = "/v4.0/chat";
+
 String speechText;
+// 计时变量（音频发送）
+unsigned long startTime = 0;
+unsigned long lastSendTime = 0;
+unsigned long globalEpochTime = 0;
+// 状态标记及结果存储
+volatile bool isRecording = false;     // 当前是否正在录音
+volatile bool speechFinished = false;  // 语音识别结果是否返回（结束帧
+
 
 // 时间ntp
 WiFiUDP udp;
@@ -152,17 +171,7 @@ typedef struct {
 SystemConfig globalConfig;
 
 // OLED屏幕
-U8G2_SSD1306_128X32_UNIVISION_F_HW_I2C u8g2(U8G2_R0, /* reset=*/U8X8_PIN_NONE, /* SCL=*/5, /* SDA=*/4);
-
-
-
-// 计时变量（音频发送）
-unsigned long startTime = 0;
-unsigned long lastSendTime = 0;
-unsigned long globalEpochTime = 0;
-// 状态标记及结果存储
-volatile bool isRecording = false;     // 当前是否正在录音
-volatile bool speechFinished = false;  // 语音识别结果是否返回（结束帧
+U8G2_SSD1306_128X32_UNIVISION_F_HW_I2C u8g2(U8G2_R0, /* reset=*/U8X8_PIN_NONE, /* SCL=*/OLED_SCL, /* SDA=*/OLED_SDA);
 
 
 
@@ -347,55 +356,11 @@ void listenButtonEvent(uint8_t pin, bool& lastState, void (*onPress)(), void (*o
 }
 
 
-String getDate() {
-  time_t epochTime = timeClient.getEpochTime();
-  struct tm* ptm = gmtime(&epochTime);  // 转换为 GMT 时间
-  char timeString[40];
-  strftime(timeString, sizeof(timeString), "%a, %d %b %Y %H:%M:%S GMT", ptm);
-  return String(timeString);
-}
-
-String createAuthUrl() {
-  String date = getDate();
-  if (date == "")
-    return "";
-  String tmp = "host: " + String(speechHost) + "\n";
-  tmp += "date: " + date + "\n";
-  tmp += "GET " + String(speechPath) + " HTTP/1.1";
-  String signature = hmacSHA256(globalConfig.apisecret, tmp);
-  String authOrigin = "api_key=\"" + String(globalConfig.apikey) + "\", algorithm=\"hmac-sha256\", headers=\"host date request-line\", signature=\"" + signature + "\"";
-  unsigned char authBase64[256] = { 0 };
-  size_t authLen = 0;
-  int ret = mbedtls_base64_encode(authBase64, sizeof(authBase64) - 1, &authLen, (const unsigned char*)authOrigin.c_str(), authOrigin.length());
-  if (ret != 0)
-    return "";
-  String authorization = String((char*)authBase64);
-  String encodedDate = "";
-  for (int i = 0; i < date.length(); i++) {
-    char c = date.charAt(i);
-    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
-      encodedDate += c;
-    } else if (c == ' ') {
-      encodedDate += "+";
-    } else if (c == ',') {
-      encodedDate += "%2C";
-    } else if (c == ':') {
-      encodedDate += "%3A";
-    } else {
-      encodedDate += "%" + String(c, HEX);
-    }
-  }
-  String url = "ws://" + String(speechHost) + String(speechPath) + "?authorization=" + authorization + "&date=" + encodedDate + "&host=" + speechHost;
-  Serial.println(url);
-  return url;
-}
-
-
 void connectToIFLY() {
   String wsUrl = createAuthUrl();
   wsSpeech.connect(wsUrl);
   wsSpeech.onMessage([](WebsocketsMessage message) {
-    Serial.println("返回内容: " + message.data());
+    Serial.println("TTS返回内容: " + message.data());
     DynamicJsonDocument doc(2048);
     DeserializationError err = deserializeJson(doc, message.data());
     if (err.c_str() != "Ok") {
@@ -415,6 +380,7 @@ void connectToIFLY() {
       }
       tempText.trim();
       speechText = tempText;
+      speechText = "你好";
       Serial.println("识别结果：" + speechText);
     }
   });
@@ -483,6 +449,56 @@ void sendAudioData(bool firstFrame = false) {
 
   wsSpeech.send(jsonBuffer);  // 发送音频数据
   Serial.printf("Sent %d bytes, status: %d\n", bytesRead, firstFrame ? 0 : 1);
+}
+
+
+void sendChatRequest(const String& userInput) {
+  DynamicJsonDocument doc(2048);
+  JsonObject header = doc.createNestedObject("header");
+  header["app_id"] = globalConfig.appid;
+  JsonObject parameter = doc.createNestedObject("parameter");
+  JsonObject chat = parameter.createNestedObject("chat");
+  chat["domain"] = "4.0Ultra";
+  chat["temperature"] = 0.5;
+  chat["max_tokens"] = 1024;
+  JsonObject payload = doc.createNestedObject("payload");
+  JsonObject message = payload.createNestedObject("message");
+  JsonArray textArr = message.createNestedArray("text");
+  // 系统提示（可根据需要修改）
+  JsonObject systemMsg = textArr.createNestedObject();
+  systemMsg["role"] = "system";
+  systemMsg["content"] = "你是个翻译员,我会形容一个单词你给我对应的音标和英语单词。返回内容;分割";  //回复太多会导致POST请求的TTS响应过慢，可以尝试分段请求或WS请求
+  // 用户输入，使用语音识别的结果
+  JsonObject userMsg = textArr.createNestedObject();
+  userMsg["role"] = "user";
+  userMsg["content"] = userInput;
+  String output;
+  serializeJson(doc, output);
+  wsChat.send(output);
+  if (!wsChat.send(output)) {
+    Serial.println("大模型数据发送失败");
+  }
+  Serial.println("已发送大模型对话请求，内容：" + userInput);
+}
+
+void processSpeechResult() {
+  // 没有录音，并且有结果的时候处理逻辑
+  if (speechText == "" || isRecording) {
+    return;
+  }
+  if (!wsChat.available()) {
+    String chatURL = generateChatAuthURL();
+    Serial.println("大模型对话WS URL：" + chatURL);
+    wsChat.onMessage([](WebsocketsMessage message) {
+      Serial.println("大模型返回内容: " + message.data());
+    });
+    wsChat.connect(chatURL);
+    unsigned long startTime = millis();
+    while (!wsChat.available() && millis() - startTime < 1000) {
+      delay(10);
+    }
+  }
+  speechText = "";
 }
 
 void startRecording() {
@@ -570,6 +586,8 @@ void loop() {
   server.handleClient();
   initButtonListener();
   wsSpeech.poll();  //持续消息接受
+  wsChat.poll();
+  processSpeechResult();
 }
 
 String lastMsg1 = "";
@@ -601,9 +619,88 @@ void sendMsg(String msg1, String msg2) {
 }
 
 
+
+
+String createAuthUrl() {
+  String date = getDate();
+  if (date == "")
+    return "";
+  String tmp = "host: " + String(speechHost) + "\n";
+  tmp += "date: " + date + "\n";
+  tmp += "GET " + String(speechPath) + " HTTP/1.1";
+  String signature = hmacSHA256(globalConfig.apisecret, tmp);
+  String authOrigin = "api_key=\"" + String(globalConfig.apikey) + "\", algorithm=\"hmac-sha256\", headers=\"host date request-line\", signature=\"" + signature + "\"";
+  unsigned char authBase64[256] = { 0 };
+  size_t authLen = 0;
+  int ret = mbedtls_base64_encode(authBase64, sizeof(authBase64) - 1, &authLen, (const unsigned char*)authOrigin.c_str(), authOrigin.length());
+  if (ret != 0)
+    return "";
+  String authorization = String((char*)authBase64);
+  String encodedDate = "";
+  for (int i = 0; i < date.length(); i++) {
+    char c = date.charAt(i);
+    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+      encodedDate += c;
+    } else if (c == ' ') {
+      encodedDate += "+";
+    } else if (c == ',') {
+      encodedDate += "%2C";
+    } else if (c == ':') {
+      encodedDate += "%3A";
+    } else {
+      encodedDate += "%" + String(c, HEX);
+    }
+  }
+  String url = "ws://" + String(speechHost) + String(speechPath) + "?authorization=" + authorization + "&date=" + encodedDate + "&host=" + speechHost;
+  Serial.println(url);
+  return url;
+}
+
+
+String generateChatAuthURL() {
+  String date = getDate();
+  if (date == "")
+    return "";
+  String tmp = "host: " + String(chatHost) + "\n";
+  tmp += "date: " + date + "\n";
+  tmp += "GET " + String(chatPath) + " HTTP/1.1";
+  String signature = hmacSHA256(globalConfig.apisecret, tmp);
+  String authOrigin = "api_key=\"" + String(globalConfig.apikey) + "\", algorithm=\"hmac-sha256\", headers=\"host date request-line\", signature=\"" + signature + "\"";
+  unsigned char authBase64[256] = { 0 };
+  size_t authLen = 0;
+  int ret = mbedtls_base64_encode(authBase64, sizeof(authBase64) - 1, &authLen, (const unsigned char*)authOrigin.c_str(), authOrigin.length());
+  if (ret != 0)
+    return "";
+  String authorization = String((char*)authBase64);
+  String encodedDate = "";
+  for (int i = 0; i < date.length(); i++) {
+    char c = date.charAt(i);
+    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+      encodedDate += c;
+    } else if (c == ' ') {
+      encodedDate += "+";
+    } else if (c == ',') {
+      encodedDate += "%2C";
+    } else if (c == ':') {
+      encodedDate += "%3A";
+    } else {
+      encodedDate += "%" + String(c, HEX);
+    }
+  }
+  String url = "ws://" + String(chatHost) + String(chatPath) + "?authorization=" + authorization + "&date=" + encodedDate + "&host=" + chatHost;
+  return url;
+}
+
 ////////////////////////////
 // 工具函数：Base64、HMAC、时间格式转换等
 ////////////////////////////
+String getDate() {
+  time_t epochTime = timeClient.getEpochTime();
+  struct tm* ptm = gmtime(&epochTime);  // 转换为 GMT 时间
+  char timeString[40];
+  strftime(timeString, sizeof(timeString), "%a, %d %b %Y %H:%M:%S GMT", ptm);
+  return String(timeString);
+}
 String base64Encode(const uint8_t* data, size_t len) {
   if (len == 0 || data == nullptr) {
     Serial.println("Base64编码错误：无数据");
