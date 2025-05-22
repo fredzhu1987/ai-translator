@@ -65,7 +65,7 @@ const char* ttsApiUrl = "https://wcode.net/api/audio/gpt/text-to-audio/v3/transc
 String speechText;                  //tts返回的用户输入语音
 String chatAggregated;              //累计大模型返回的文字
 unsigned long lastChatMsgTime = 0;  //最后大模型的时间，计算下间隔以后在播放
-
+String lastAudioUrl;
 
 
 // 计时变量（音频发送）
@@ -521,6 +521,7 @@ void playTTS(String text) {
   }
   if (!audioUrl.isEmpty()) {
     Serial.println("播放音频URL: " + audioUrl);
+    lastAudioUrl = audioUrl;  //后续重放用
     wsSpeech.close();
     wsChat.close();
     delay(100);
@@ -552,7 +553,7 @@ void sendChatRequest(const String& userInput) {
   // 系统提示（可根据需要修改）
   JsonObject systemMsg = textArr.createNestedObject();
   systemMsg["role"] = "system";
-  systemMsg["content"] = "你是个翻译员,我会形容一个单词你给我对应的音标和英语单词。返回内容;分割";  //回复太多会导致POST请求的TTS响应过慢，可以尝试分段请求或WS请求
+  systemMsg["content"] = "你是个翻译员,给一个单词或者短句,你只返回英语和单词翻译。用|分割。举例输入:苹果的英文怎么说,输出: 苹果|apple";
   // 用户输入，使用语音识别的结果
   JsonObject userMsg = textArr.createNestedObject();
   userMsg["role"] = "user";
@@ -563,7 +564,7 @@ void sendChatRequest(const String& userInput) {
   if (!wsChat.send(output)) {
     Serial.println("大模型数据发送失败");
   }
-  Serial.println("已发送大模型对话请求，内容：" + userInput);
+  Serial.println("发送大模型对话请求，内容：" + output);
 }
 
 void processChatResult() {
@@ -856,31 +857,32 @@ String hmacSHA256(const String& key, const String& data) {
 
 
 String removeNonUTF8(String chatAggregated) {
-  String result = "";
-  for (size_t i = 0; i < chatAggregated.length(); i++) {
-    uint8_t c = chatAggregated[i];  // 使用 uint8_t 来处理每个字节
+  return chatAggregated;
+  // String result = "";
+  // for (size_t i = 0; i < chatAggregated.length(); i++) {
+  //   uint8_t c = chatAggregated[i];  // 使用 uint8_t 来处理每个字节
 
-    // 检查英文字符
-    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
-      result += (char)c;
-    }
-    // 检查数字
-    else if (c >= '0' && c <= '9') {
-      result += (char)c;
-    }
-    // 检查英文符号 “,” “.”
-    else if (c == ',' || c == '.') {
-      result += (char)c;
-    }
-    // 检查中文字符（UTF-8，3字节）
-    else if (i + 2 < chatAggregated.length() && (uint8_t)chatAggregated[i] >= 0xE4 && (uint8_t)chatAggregated[i] <= 0xE9) {  // 判断UTF-8中文起始字节范围
-      uint8_t c2 = (uint8_t)chatAggregated[i + 1];
-      uint8_t c3 = (uint8_t)chatAggregated[i + 2];
-      if (c2 >= 0x80 && c2 <= 0xBF && c3 >= 0x80 && c3 <= 0xBF) {
-        result += chatAggregated.substring(i, i + 3);
-        i += 2;  // 跳过后两个字节
-      }
-    }
-  }
-  return result;
+  //   // 检查英文字符
+  //   if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+  //     result += (char)c;
+  //   }
+  //   // 检查数字
+  //   else if (c >= '0' && c <= '9') {
+  //     result += (char)c;
+  //   }
+  //   // 检查英文符号 “,” “.”
+  //   else if (c == ',' || c == '.') {
+  //     result += (char)c;
+  //   }
+  //   // 检查中文字符（UTF-8，3字节）
+  //   else if (i + 2 < chatAggregated.length() && (uint8_t)chatAggregated[i] >= 0xE4 && (uint8_t)chatAggregated[i] <= 0xE9) {  // 判断UTF-8中文起始字节范围
+  //     uint8_t c2 = (uint8_t)chatAggregated[i + 1];
+  //     uint8_t c3 = (uint8_t)chatAggregated[i + 2];
+  //     if (c2 >= 0x80 && c2 <= 0xBF && c3 >= 0x80 && c3 <= 0xBF) {
+  //       result += chatAggregated.substring(i, i + 3);
+  //       i += 2;  // 跳过后两个字节
+  //     }
+  //   }
+  // }
+  // return result;
 }
