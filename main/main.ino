@@ -84,7 +84,7 @@ volatile bool speechFinished = false;  // 语音识别结果是否返回（结�
 
 // 时间ntp
 WiFiUDP udp;
-NTPClient timeClient(udp, "pool.ntp.org", 0, 60000);
+NTPClient timeClient(udp, "cn.pool.ntp.org", 0, 60000);
 
 
 // 首页的网页
@@ -163,7 +163,6 @@ const char indexHtml[] PROGMEM = R"rawliteral(
         <input type='text' name='appid' placeholder='输入讯飞Appid' class='search-box'>
         <input type='text' name='apikey' placeholder='输入讯飞ApiKey' class='search-box'>
         <input type='text' name='apisecret' placeholder='输入讯飞ApiSecret' class='search-box'>
-        <input type='text' name='ttsapikey' placeholder='输入万码云apikey' class='search-box'>
         <input type='submit'  style="height: 50px;width: 320px"  class='button'  value="保存">
     </div>
 </form>
@@ -315,7 +314,7 @@ void initServer() {
     String appid = server.arg("appid");
     String apikey = server.arg("apikey");
     String apisecret = server.arg("apisecret");
-    String ttsapikey = server.arg("ttsapikey");
+    // String ttsapikey = server.arg("ttsapikey");
     // 创建JSON文档
     DynamicJsonDocument doc(2048);
     doc["ssid"] = ssid;
@@ -323,7 +322,7 @@ void initServer() {
     doc["appid"] = appid;
     doc["apikey"] = apikey;
     doc["apisecret"] = apisecret;
-    doc["ttsapikey"] = ttsapikey;
+    // doc["ttsapikey"] = ttsapikey;
     // 保存到SPIFFS
     File file = SPIFFS.open(configFile, "w");
     if (!file) {
@@ -371,7 +370,7 @@ void listenButtonEvent(uint8_t pin, bool& lastState, void (*onPress)(), void (*o
 
 void connectToIFLY() {
   String wsUrl = createAuthUrl();
-  wsSpeech.connect(wsUrl);
+  bool connected = wsSpeech.connect(wsUrl);
   wsSpeech.onMessage([](WebsocketsMessage message) {
     Serial.println("[tts2text]返回内容: " + message.data());
     DynamicJsonDocument doc(2048);
@@ -415,7 +414,11 @@ void connectToIFLY() {
   jsonDoc["data"]["encoding"] = "raw";
   char buf[512];
   serializeJson(jsonDoc, buf);
-  wsSpeech.send(buf);
+  if (!connected) {
+    Serial.println("[tts2text]Not Connected!");
+  } else {
+    wsSpeech.send(buf);
+  }
 }
 
 void sendAudioData(bool firstFrame = false) {
@@ -500,14 +503,20 @@ void playTTS(String text) {
     wsTTS.onMessage([](WebsocketsMessage message) {
       Serial.println("[TTS]返回内容: " + message.data());
     });
-    wsTTS.connect(ttsURL);
+    bool connected = wsTTS.connect(ttsURL);
     unsigned long startTime = millis();
     while (!wsTTS.available() && millis() - startTime < 1000) {
       delay(10);
     }
+    if (!connected) {
+      Serial.println("[TTS]Not Connected!");
+    } else {
+      Serial.println("[TTS]连接成功");
+      sendTTSRequest(speechText);
+    }
+  } else {
+    sendTTSRequest(speechText);
   }
-  Serial.println("[TTS]连接成功");
-  sendTTSRequest(speechText);
 }
 
 void sendChatRequest(const String& userInput) {
@@ -579,19 +588,25 @@ void processSpeechResult() {
         Serial.println("[chat]请求失败，错误码：" + String(code));
       }
     });
-    wsChat.connect(chatURL);
+    bool connected = wsChat.connect(chatURL);
     unsigned long startTime = millis();
     while (!wsChat.available() && millis() - startTime < 1000) {
       delay(10);
     }
     Serial.println("[chat]连接成功");
+    if (!connected) {
+      Serial.println("[TTS]Not Connected!");
+    } else {
+      sendChatRequest(speechText);
+    }
+  } else {
     sendChatRequest(speechText);
   }
   speechText = "";
 }
 
 void startRecording() {
-  Serial.println("startRecording");
+  Serial.println("[btn]startRecording");
 
   isRecording = true;
   startTime = millis();
@@ -599,7 +614,7 @@ void startRecording() {
 }
 
 void stopRecording() {
-  Serial.println("stopRecording");
+  Serial.println("[btn]stopRecording");
   isRecording = false;
   // 发个bye
   DynamicJsonDocument jsonDoc(2048);
@@ -608,13 +623,13 @@ void stopRecording() {
   serializeJson(jsonDoc, buf);
   if (!wsSpeech.send(buf)) {
     // 失败逻辑
-    Serial.println("发送语音失败");
+    Serial.println("[btn]发送语音失败");
   }
-  Serial.println("录音结束，已发送结束信号");
+  Serial.println("[btn]录音结束，已发送结束信号");
 }
 
 void handlePress1() {
-  sendMsg("", "开始语音识别:" + isRecording);
+  sendMsg("", "[btn]开始语音识别:" + isRecording);
   if (!isRecording) {
     connectToIFLY();
     startRecording();
@@ -625,11 +640,16 @@ void handleRelease1() {
   if (isRecording) {
     stopRecording();
   }
-  sendMsg("", "按钮1松开:" + isRecording);
+  sendMsg("", "[btn]按钮1松开:" + isRecording);
 }
 
 void initButtonListener() {
   listenButtonEvent(BUTTON_PIN_1, buttonLastState1, handlePress1, handleRelease1);
+}
+
+void displayTask(void *parameter) {
+  timeClient.update();
+  Serial.println("[task]displayTask");
 }
 
 void setup() {
@@ -659,6 +679,8 @@ void setup() {
   initI2SMic();
   initI2SSpeaker();
   initServer();
+  // 1秒刷新下的任务。和loop不一样
+  xTaskCreatePinnedToCore(displayTask, "DisplayTask", 10000, NULL, 1, NULL, 1);
   // 读取配置
   bool status = loadConfig();
   if (status) {
@@ -822,6 +844,7 @@ String getDate() {
   struct tm* ptm = gmtime(&epochTime);  // 转换为 GMT 时间
   char timeString[40];
   strftime(timeString, sizeof(timeString), "%a, %d %b %Y %H:%M:%S GMT", ptm);
+  Serial.println("[ntp]timeString:" + String(timeString));
   return String(timeString);
 }
 String base64Encode(const uint8_t* data, size_t len) {
