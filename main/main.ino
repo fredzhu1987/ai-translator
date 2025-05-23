@@ -803,7 +803,7 @@ String generateTTsAuthURL() {
       encodedDate += "%" + String(c, HEX);
     }
   }
-  String url = "ws://" + String(chatHost) + String(chatPath) + "?authorization=" + authorization + "&date=" + encodedDate + "&host=" + chatHost;
+  String url = "ws://" + String(ttsHost) + String(ttsPath) + "?authorization=" + authorization + "&date=" + encodedDate + "&host=" + ttsHost;
   return url;
 }
 
@@ -837,7 +837,7 @@ String generateChatAuthURL() {
       encodedDate += "%" + String(c, HEX);
     }
   }
-  String url = "ws://" + String(ttsHost) + String(ttsPath) + "?authorization=" + authorization + "&date=" + encodedDate + "&host=" + chatHost;
+  String url = "ws://" + String(chatHost) + String(chatPath) + "?authorization=" + authorization + "&date=" + encodedDate + "&host=" + chatHost;
   return url;
 }
 
