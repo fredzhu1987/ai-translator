@@ -71,6 +71,7 @@ String speechText;                  //tts返回的用户输入语音
 String chatAggregated;              //累计大模型返回的文字
 unsigned long lastChatMsgTime = 0;  //最后大模型的时间，计算下间隔以后在播放
 String lastAudioUrl;
+String ttsAudioBase64;
 
 
 // 计时变量（音频发送）
@@ -468,6 +469,7 @@ void sendAudioData(bool firstFrame = false) {
 }
 
 void sendTTSRequest(const String& text) {
+  Serial.println("[TTS]sendTTSRequest text:" + text);
   DynamicJsonDocument doc(2048);
   JsonObject common = doc.createNestedObject("common");
   common["app_id"] = globalConfig.appid;
@@ -497,12 +499,60 @@ void sendTTSRequest(const String& text) {
   }
 }
 
-void playTTS(String text) {
+void playAudio(String audio_base64) {
+
+  size_t base64_len = audio_base64.length();
+  // 2. Base64 解码
+  unsigned char decoded_audio[8192];
+  size_t decoded_len = 0;
+  // int ret = mbedtls_base64_decode(decoded_audio, sizeof(decoded_audio), &decoded_len,
+  //                                 (const unsigned char*)audio_base64, base64_len);
+  int ret = mbedtls_base64_decode(decoded_audio, sizeof(decoded_audio), &decoded_len,
+                                  (const unsigned char*)audio_base64.c_str(), base64_len);
+  if (ret != 0) {
+    Serial.print("[audio]Base64 解码失败: ");
+    Serial.println(ret);
+    return;
+  }
+  Serial.print("[audio]解码成功，长度: ");
+  Serial.println(decoded_len);
+
+  // 3. 播放 PCM 数据
+  size_t bytes_written;
+  i2s_write(I2S_NUM_0, decoded_audio, decoded_len, &bytes_written, portMAX_DELAY);
+  Serial.print("[audio]播放完成，实际写入: ");
+  Serial.println(bytes_written);
+}
+
+void txt2TTS(String text) {
   if (!wsTTS.available()) {
     String ttsURL = generateTTsAuthURL();
     Serial.println("[TTS]连接 URL：" + ttsURL);
     wsTTS.onMessage([](WebsocketsMessage message) {
       Serial.println("[TTS]返回内容: " + message.data());
+      DynamicJsonDocument doc(2048);
+      DeserializationError err = deserializeJson(doc, message.data());
+      if (err.c_str() != "Ok") {
+        Serial.print("[TTS]大模型JSON解析错误:");
+        Serial.println(err.c_str());
+        return;
+      }
+      int code = doc["code"];
+      if (code == 0) {
+        // 提取当前回复内容和序号
+        if (doc["data"].isNull()) {
+          return;
+        }
+        int status = doc["data"]["status"];
+        ttsAudioBase64 = doc["data"]["audio"].as<String>();
+        Serial.println("[TTS]当前累计回复：" + ttsAudioBase64);
+        if (status == 2) {
+          playAudio(ttsAudioBase64);
+          wsTTS.close();  //关闭连接
+        }
+      } else {
+        Serial.println("[TTS]请求失败，错误码：" + String(code));
+      }
     });
     bool connected = wsTTS.connect(ttsURL);
     unsigned long startTime = millis();
@@ -513,10 +563,10 @@ void playTTS(String text) {
       Serial.println("[TTS]Not Connected!");
     } else {
       Serial.println("[TTS]连接成功");
-      sendTTSRequest(speechText);
+      sendTTSRequest(text);
     }
   } else {
-    sendTTSRequest(speechText);
+    sendTTSRequest(text);
   }
 }
 
@@ -584,7 +634,7 @@ void processSpeechResult() {
         }
         Serial.println("[chat]当前累计回复：" + chatAggregated);
         wsChat.close();  //关闭连接
-        playTTS(chatAggregated);
+        txt2TTS(chatAggregated);
       } else {
         Serial.println("[chat]请求失败，错误码：" + String(code));
       }
@@ -886,5 +936,3 @@ String hmacSHA256(const String& key, const String& data) {
   mbedtls_base64_encode(base64Result, sizeof(base64Result), &outLen, hmacResult, sizeof(hmacResult));
   return String((char*)base64Result);
 }
-
-
