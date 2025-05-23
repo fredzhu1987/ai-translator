@@ -17,7 +17,7 @@ using namespace websockets;
 
 
 // 麦克风 INMP441 (I2S 输入)
-#define I2S_MIC_BCLK 15
+#define I2S_MIC_SCK 15
 #define I2S_MIC_WS 16
 #define I2S_MIC_SD 17
 
@@ -28,7 +28,6 @@ using namespace websockets;
 
 // 麦克风采样参数
 #define SAMPLE_RATE 16000
-#define I2S_SAMPLE_BITS 16
 #define RECORD_SECONDS 5  // 可设为 30
 #define RECORD_BUFFER_SIZE (SAMPLE_RATE * RECORD_SECONDS)
 
@@ -39,7 +38,9 @@ using namespace websockets;
 
 // 按钮
 #define BUTTON_PIN_1 18
+#define BUTTON_PIN_2 8
 bool buttonLastState1 = HIGH;
+bool buttonLastState2 = HIGH;
 
 // AP账号和密码
 const char* ssid = "AIWifi";
@@ -63,21 +64,16 @@ const char* chatPath = "/v4.0/chat";
 const char* ttsHost = "tts-api.xfyun.cn";
 const char* ttsPath = "/v2/tts";
 
-// 文本转换tts
-const char* ttsApiUrl = "https://wcode.net/api/audio/gpt/text-to-audio/v3/transcription";
-
-
 String speechText;                  //tts返回的用户输入语音
 String chatAggregated;              //累计大模型返回的文字
 unsigned long lastChatMsgTime = 0;  //最后大模型的时间，计算下间隔以后在播放
 String lastAudioUrl;
 String ttsAudioBase64;
-
+const int FRAME_SIZE = 1280;  // 16-bit PCM，每帧 1280B 对应 40ms
 
 // 计时变量（音频发送）
 unsigned long startTime = 0;
 unsigned long lastSendTime = 0;
-unsigned long globalEpochTime = 0;
 // 状态标记及结果存储
 volatile bool isRecording = false;     // 当前是否正在录音
 volatile bool speechFinished = false;  // 语音识别结果是否返回（结束帧
@@ -231,7 +227,9 @@ bool loadConfig() {
 void initButton() {
   // 使用内部上拉
   pinMode(BUTTON_PIN_1, INPUT_PULLUP);
+  pinMode(BUTTON_PIN_2, INPUT_PULLUP);
   buttonLastState1 = HIGH;
+  buttonLastState2 = HIGH;
   Serial.println("initButton finished");
 }
 // 初始化 I2S 麦克风
@@ -248,7 +246,7 @@ void initI2SMic() {
   };
 
   const i2s_pin_config_t inmp441_pin_config = {
-    .bck_io_num = I2S_MIC_BCLK,
+    .bck_io_num = I2S_MIC_SCK,
     .ws_io_num = I2S_MIC_WS,
     .data_out_num = I2S_PIN_NO_CHANGE,
     .data_in_num = I2S_MIC_SD
@@ -393,10 +391,10 @@ void connectToIFLY() {
       tempText.trim();
       speechText = tempText;
       Serial.println("[tts2text]识别结果 tempText：" + tempText);
-      speechText = "你好英文怎么说";
+      // speechText = "你好英文怎么说";
       Serial.println("[tts2text]识别结果 speechText：" + speechText);
+      wsSpeech.close();  //关闭连接
     }
-    wsSpeech.close();  //关闭连接
   });
   // 等待 WebSocket 连接建立
   unsigned long startTime = millis();
@@ -419,13 +417,13 @@ void connectToIFLY() {
     Serial.println("[tts2text]Not Connected!");
   } else {
     Serial.println("[tts2text]连接成功");
+    Serial.printf("[tts2text]first jsonBuffer %s\n", buf);
     wsSpeech.send(buf);
   }
 }
 
 void sendAudioData(bool firstFrame = false) {
-  Serial.println("sendAudioData");
-  const int FRAME_SIZE = 1280;        // 16-bit PCM，每帧 1280B 对应 40ms
+  Serial.println("[tts2text]sendAudioData");
   static uint8_t buffer[FRAME_SIZE];  // 音频数据缓冲区
   size_t bytesRead = 0;
   static unsigned long lastSendTime = 0;
@@ -434,6 +432,7 @@ void sendAudioData(bool firstFrame = false) {
 
   // 每40ms发送一次音频
   if (currentMillis - lastSendTime < 40) {
+    Serial.println("[tts2text]不足40ms不发送数据");
     return;  // 如果间隔不到40ms，不发送数据
   }
 
@@ -442,14 +441,14 @@ void sendAudioData(bool firstFrame = false) {
   // 读取 I2S 音频数据
   esp_err_t result = i2s_read(I2S_NUM_1, buffer, FRAME_SIZE, &bytesRead, portMAX_DELAY);
   if (result != ESP_OK || bytesRead == 0) {
-    Serial.println("I2S Read Failed or No Data!");
+    Serial.println("[tts2text]I2S Read Failed or No Data!");
     return;
   }
 
   // Base64 编码
   String base64Audio = base64Encode(buffer, bytesRead);
   if (base64Audio.length() == 0) {
-    Serial.println("Base64 Encoding Failed!");
+    Serial.println("[tts2text]Base64 Encoding Failed!");
     return;
   }
 
@@ -462,10 +461,13 @@ void sendAudioData(bool firstFrame = false) {
 
   char jsonBuffer[2048];
   serializeJson(jsonDoc, jsonBuffer);
-  Serial.printf("jsonBuffer %s", jsonBuffer);
+  Serial.printf("[tts2text]jsonBuffer %s\n", jsonBuffer);
 
-  wsSpeech.send(jsonBuffer);  // 发送音频数据
-  Serial.printf("Sent %d bytes, status: %d\n", bytesRead, firstFrame ? 0 : 1);
+  if (!wsSpeech.send(jsonBuffer)) {
+    Serial.println("[tts2text]数据发送失败");
+  } else {
+    Serial.println("[tts2text]数据发送成功");
+  }
 }
 
 void sendTTSRequest(const String& text) {
@@ -500,7 +502,7 @@ void sendTTSRequest(const String& text) {
 }
 
 void playAudio(String base64PcmData) {
-
+  Serial.println("[audio]playAudio");
   // 先计算输出 buffer 长度
   size_t output_len = 0;
   int ret = mbedtls_base64_decode(NULL, 0, &output_len,
@@ -527,11 +529,14 @@ void playAudio(String base64PcmData) {
   }
 
   size_t bytes_written = 0;
+  i2s_zero_dma_buffer(I2S_NUM_0);
   esp_err_t err = i2s_write(I2S_NUM_0, decodedBuffer, output_len, &bytes_written, portMAX_DELAY);
   if (err != ESP_OK) {
     Serial.printf("[audio] i2s_write failed with error: 0x%x\n", err);
   } else {
     Serial.printf("[audio] i2s_write success, bytes_written: %d\n", bytes_written);
+    i2s_zero_dma_buffer(I2S_NUM_0);  // 清除 DMA 缓冲，避免重复播放
+    i2s_stop(I2S_NUM_0);             // 停止 I2S 传
   }
 }
 
@@ -596,7 +601,7 @@ void sendChatRequest(const String& userInput) {
   // 系统提示（可根据需要修改）
   JsonObject systemMsg = textArr.createNestedObject();
   systemMsg["role"] = "system";
-  systemMsg["content"] = "你是个翻译员,给一个单词或者短句,你只返回英语和单词翻译。用|分割。举例输入:苹果的英文怎么说,输出: 苹果|apple";
+  systemMsg["content"] = "你是个翻译员,给一个单词或者短句,你只返回中文和英文单词即可。用|分割。举例输入:苹果的英文怎么说,输出: 苹果|apple";
   // 用户输入，使用语音识别的结果
   JsonObject userMsg = textArr.createNestedObject();
   userMsg["role"] = "user";
@@ -672,28 +677,32 @@ void startRecording() {
 
   isRecording = true;
   startTime = millis();
-  sendAudioData(true);
+  // sendAudioData(true);
+  sendAudioData(false);
 }
 
 void stopRecording() {
   Serial.println("[btn]stopRecording");
-  isRecording = false;
+
   // 发个bye
   DynamicJsonDocument jsonDoc(2048);
   jsonDoc["data"]["status"] = 2;  // 结束传输
   char buf[128];
   serializeJson(jsonDoc, buf);
-  if (!wsSpeech.send(buf)) {
-    // 失败逻辑
-    Serial.println("[btn]发送语音失败");
+  Serial.printf("[tts2text]jsonBuffer %s\n", buf);
+
+  if (!wsSpeech.send(buf)) {  // 失败逻辑
+    Serial.println("[tts2text]发送语音失败,结束指令");
+  } else {
+    Serial.println("[tts2text]发送语音成功,结束指令");
   }
-  Serial.println("[btn]录音结束，已发送结束信号");
+  isRecording = false;
 }
 
 void handlePress1() {
-  sendMsg("", "[btn]开始语音识别:" + isRecording);
+  sendMsg("", "[btn]开始语音识别");
+  connectToIFLY();
   if (!isRecording) {
-    connectToIFLY();
     startRecording();
   }
 }
@@ -702,11 +711,21 @@ void handleRelease1() {
   if (isRecording) {
     stopRecording();
   }
-  sendMsg("", "[btn]按钮1松开:" + isRecording);
+  sendMsg("", "[btn]按钮1松开");
+}
+
+
+void handlePress2() {
+  sendMsg("", "[btn]重播");
+}
+
+void handleRelease2() {
+  sendMsg("", "[btn]按钮2松开");
 }
 
 void initButtonListener() {
   listenButtonEvent(BUTTON_PIN_1, buttonLastState1, handlePress1, handleRelease1);
+  listenButtonEvent(BUTTON_PIN_2, buttonLastState2, handlePress2, handleRelease2);
 }
 
 void displayTask(void* parameter) {
@@ -764,6 +783,10 @@ void loop() {
   wsSpeech.poll();  //持续消息接受
   wsChat.poll();
   wsTTS.poll();
+  // 持续发送音频数据
+  if (isRecording) {
+    sendAudioData(false);
+  }
   processSpeechResult();
   processChatResult();
 }
