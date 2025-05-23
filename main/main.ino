@@ -474,7 +474,8 @@ void sendTTSRequest(const String& text) {
   JsonObject common = doc.createNestedObject("common");
   common["app_id"] = globalConfig.appid;
   JsonObject business = doc.createNestedObject("business");
-  business["aue"] = "lame";
+  business["aue"] = "raw";
+  business["auf"] = "audio/L16;rate=8000";
   business["vcn"] = "xiaoyan";
   business["pitch"] = 50;
   business["speed"] = 50;
@@ -499,27 +500,37 @@ void sendTTSRequest(const String& text) {
   }
 }
 
-void playAudio(String audio_base64) {
+void playAudio(String base64PcmData) {
 
-  size_t base64_len = audio_base64.length();
-  // 2. Base64 解码
-  unsigned char decoded_audio[8192];
-  size_t decoded_len = 0;
-  // int ret = mbedtls_base64_decode(decoded_audio, sizeof(decoded_audio), &decoded_len,
-  //                                 (const unsigned char*)audio_base64, base64_len);
-  int ret = mbedtls_base64_decode(decoded_audio, sizeof(decoded_audio), &decoded_len,
-                                  (const unsigned char*)audio_base64.c_str(), base64_len);
-  if (ret != 0) {
-    Serial.print("[audio]Base64 解码失败: ");
-    Serial.println(ret);
+  // 先计算输出 buffer 长度
+  size_t output_len = 0;
+  int ret = mbedtls_base64_decode(NULL, 0, &output_len,
+                                  (const unsigned char*)base64PcmData.c_str(),
+                                  base64PcmData.length());
+  if (ret != MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL) {
+    Serial.println("[audio]Base64长度计算失败");
     return;
   }
-  Serial.print("[audio]解码成功，长度: ");
-  Serial.println(decoded_len);
 
-  // 3. 播放 PCM 数据
-  size_t bytes_written;
-  i2s_write(I2S_NUM_0, decoded_audio, decoded_len, &bytes_written, portMAX_DELAY);
+  unsigned char* decodedBuffer = new unsigned char[output_len];
+  if (!decodedBuffer) {
+    Serial.println("[audio]内存分配失败");
+    return;
+  }
+
+  ret = mbedtls_base64_decode(decodedBuffer, output_len, &output_len,
+                              (const unsigned char*)base64PcmData.c_str(),
+                              base64PcmData.length());
+  if (ret != 0) {
+    Serial.println("[audio]Base64解码失败");
+    delete[] decodedBuffer;
+    return;
+  }
+
+  size_t bytes_written = 0;
+  esp_err_t err = i2s_write(I2S_NUM_0, decodedBuffer, output_len, &bytes_written, portMAX_DELAY);
+
+
   Serial.print("[audio]播放完成，实际写入: ");
   Serial.println(bytes_written);
 }
@@ -902,6 +913,7 @@ String getDate() {
   Serial.println("[ntp]timeString:" + String(timeString));
   return String(timeString);
 }
+
 String base64Encode(const uint8_t* data, size_t len) {
   if (len == 0 || data == nullptr) {
     Serial.println("Base64编码错误：无数据");
@@ -921,6 +933,7 @@ String base64Encode(const uint8_t* data, size_t len) {
   free(buf);
   return encoded;
 }
+
 
 String hmacSHA256(const String& key, const String& data) {
   unsigned char hmacResult[32];
