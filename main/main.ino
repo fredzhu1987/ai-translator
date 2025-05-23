@@ -22,8 +22,8 @@ using namespace websockets;
 #define I2S_MIC_SD 17
 
 // 扬声器
-#define I2S_SPK_BCLK 12
 #define I2S_SPK_LRC 11
+#define I2S_SPK_BCLK 12
 #define I2S_SPK_DIN 13
 
 // 麦克风采样参数
@@ -475,7 +475,6 @@ void sendTTSRequest(const String& text) {
   common["app_id"] = globalConfig.appid;
   JsonObject business = doc.createNestedObject("business");
   business["aue"] = "raw";
-  business["auf"] = "audio/L16;rate=8000";
   business["vcn"] = "xiaoyan";
   business["pitch"] = 50;
   business["speed"] = 50;
@@ -529,10 +528,11 @@ void playAudio(String base64PcmData) {
 
   size_t bytes_written = 0;
   esp_err_t err = i2s_write(I2S_NUM_0, decodedBuffer, output_len, &bytes_written, portMAX_DELAY);
-
-
-  Serial.print("[audio]播放完成，实际写入: ");
-  Serial.println(bytes_written);
+  if (err != ESP_OK) {
+    Serial.printf("[audio] i2s_write failed with error: 0x%x\n", err);
+  } else {
+    Serial.printf("[audio] i2s_write success, bytes_written: %d\n", bytes_written);
+  }
 }
 
 void txt2TTS(String text) {
