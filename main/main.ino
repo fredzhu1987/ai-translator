@@ -28,7 +28,7 @@ using namespace websockets;
 
 // 麦克风采样参数
 #define SAMPLE_RATE 16000
-#define RECORD_SECONDS 5  // 可设为 30
+#define RECORD_SECONDS 30  // 可设为 30
 #define RECORD_BUFFER_SIZE (SAMPLE_RATE * RECORD_SECONDS)
 
 // oled
@@ -368,7 +368,7 @@ void listenButtonEvent(uint8_t pin, bool& lastState, void (*onPress)(), void (*o
 
 
 void connectToIFLY() {
-  String wsUrl = createAuthUrl();
+  String wsUrl = generateXunFeiAuthURL(speechHost, speechPath);
   bool connected = wsSpeech.connect(wsUrl);
   wsSpeech.onMessage([](WebsocketsMessage message) {
     Serial.println("[tts2text]返回内容: " + message.data());
@@ -542,7 +542,7 @@ void playAudio(String base64PcmData) {
 
 void txt2TTS(String text) {
   if (!wsTTS.available()) {
-    String ttsURL = generateTTsAuthURL();
+    String ttsURL = generateXunFeiAuthURL(ttsHost, ttsPath);
     Serial.println("[TTS]连接 URL：" + ttsURL);
     wsTTS.onMessage([](WebsocketsMessage message) {
       Serial.println("[TTS]返回内容: " + message.data());
@@ -626,7 +626,7 @@ void processSpeechResult() {
   }
   Serial.println("[chat]speechText:" + speechText);
   if (!wsChat.available()) {
-    String chatURL = generateChatAuthURL();
+    String chatURL = generateXunFeiAuthURL(chatHost, chatPath);
     Serial.println("[chat]大模型对话WS URL:" + chatURL);
     wsChat.onMessage([](WebsocketsMessage message) {
       Serial.println("[chat]大模型返回内容:" + message.data());
@@ -820,13 +820,13 @@ void sendMsg(String msg1, String msg2) {
 }
 
 
-String createAuthUrl() {
+String generateXunFeiAuthURL(String host, String path) {
   String date = getDate();
   if (date == "")
     return "";
-  String tmp = "host: " + String(speechHost) + "\n";
+  String tmp = "host: " + String(host) + "\n";
   tmp += "date: " + date + "\n";
-  tmp += "GET " + String(speechPath) + " HTTP/1.1";
+  tmp += "GET " + String(path) + " HTTP/1.1";
   String signature = hmacSHA256(globalConfig.apisecret, tmp);
   String authOrigin = "api_key=\"" + String(globalConfig.apikey) + "\", algorithm=\"hmac-sha256\", headers=\"host date request-line\", signature=\"" + signature + "\"";
   unsigned char authBase64[256] = { 0 };
@@ -850,78 +850,7 @@ String createAuthUrl() {
       encodedDate += "%" + String(c, HEX);
     }
   }
-  String url = "ws://" + String(speechHost) + String(speechPath) + "?authorization=" + authorization + "&date=" + encodedDate + "&host=" + speechHost;
-  Serial.println(url);
-  return url;
-}
-
-
-
-String generateTTsAuthURL() {
-  String date = getDate();
-  if (date == "")
-    return "";
-  String tmp = "host: " + String(ttsHost) + "\n";
-  tmp += "date: " + date + "\n";
-  tmp += "GET " + String(ttsPath) + " HTTP/1.1";
-  String signature = hmacSHA256(globalConfig.apisecret, tmp);
-  String authOrigin = "api_key=\"" + String(globalConfig.apikey) + "\", algorithm=\"hmac-sha256\", headers=\"host date request-line\", signature=\"" + signature + "\"";
-  unsigned char authBase64[256] = { 0 };
-  size_t authLen = 0;
-  int ret = mbedtls_base64_encode(authBase64, sizeof(authBase64) - 1, &authLen, (const unsigned char*)authOrigin.c_str(), authOrigin.length());
-  if (ret != 0)
-    return "";
-  String authorization = String((char*)authBase64);
-  String encodedDate = "";
-  for (int i = 0; i < date.length(); i++) {
-    char c = date.charAt(i);
-    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
-      encodedDate += c;
-    } else if (c == ' ') {
-      encodedDate += "+";
-    } else if (c == ',') {
-      encodedDate += "%2C";
-    } else if (c == ':') {
-      encodedDate += "%3A";
-    } else {
-      encodedDate += "%" + String(c, HEX);
-    }
-  }
-  String url = "ws://" + String(ttsHost) + String(ttsPath) + "?authorization=" + authorization + "&date=" + encodedDate + "&host=" + ttsHost;
-  return url;
-}
-
-String generateChatAuthURL() {
-  String date = getDate();
-  if (date == "")
-    return "";
-  String tmp = "host: " + String(chatHost) + "\n";
-  tmp += "date: " + date + "\n";
-  tmp += "GET " + String(chatPath) + " HTTP/1.1";
-  String signature = hmacSHA256(globalConfig.apisecret, tmp);
-  String authOrigin = "api_key=\"" + String(globalConfig.apikey) + "\", algorithm=\"hmac-sha256\", headers=\"host date request-line\", signature=\"" + signature + "\"";
-  unsigned char authBase64[256] = { 0 };
-  size_t authLen = 0;
-  int ret = mbedtls_base64_encode(authBase64, sizeof(authBase64) - 1, &authLen, (const unsigned char*)authOrigin.c_str(), authOrigin.length());
-  if (ret != 0)
-    return "";
-  String authorization = String((char*)authBase64);
-  String encodedDate = "";
-  for (int i = 0; i < date.length(); i++) {
-    char c = date.charAt(i);
-    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
-      encodedDate += c;
-    } else if (c == ' ') {
-      encodedDate += "+";
-    } else if (c == ',') {
-      encodedDate += "%2C";
-    } else if (c == ':') {
-      encodedDate += "%3A";
-    } else {
-      encodedDate += "%" + String(c, HEX);
-    }
-  }
-  String url = "ws://" + String(chatHost) + String(chatPath) + "?authorization=" + authorization + "&date=" + encodedDate + "&host=" + chatHost;
+  String url = "ws://" + String(host) + String(path) + "?authorization=" + authorization + "&date=" + encodedDate + "&host=" + host;
   return url;
 }
 
