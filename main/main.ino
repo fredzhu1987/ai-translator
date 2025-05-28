@@ -10,8 +10,7 @@
 #include <mbedtls/sha256.h>
 #include <ArduinoWebsockets.h>  //https://github.com/gilmaimon/ArduinoWebsockets
 #include <NTPClient.h>
-#include <WiFiUdp.h>
-
+#include <Base64_Arturo.h>
 
 using namespace websockets;
 
@@ -20,16 +19,18 @@ using namespace websockets;
 #define I2S_MIC_SCK 15
 #define I2S_MIC_WS 16
 #define I2S_MIC_SD 17
+#define SAMPLE_RATE 16000
+#define CHANNELS 1
+#define BIT_DEPTH 16
+#define FRAME_SIZE 1280  // 16-bit PCM，每帧 1280B 对应 40ms
+#define CHUNK_SIZE 1024
+
 
 // 扬声器
 #define I2S_SPK_LRC 11
 #define I2S_SPK_BCLK 12
 #define I2S_SPK_DIN 13
 
-// 麦克风采样参数
-#define SAMPLE_RATE 16000
-#define RECORD_SECONDS 5  // 可设为 30
-#define RECORD_BUFFER_SIZE (SAMPLE_RATE * RECORD_SECONDS)
 
 // oled
 #define OLED_SCL 5
@@ -69,7 +70,6 @@ String chatAggregated;              //累计大模型返回的文字
 unsigned long lastChatMsgTime = 0;  //最后大模型的时间，计算下间隔以后在播放
 String lastAudioUrl;
 String ttsAudioBase64;
-const int FRAME_SIZE = 1280;  // 16-bit PCM，每帧 1280B 对应 40ms
 
 // 计时变量（音频发送）
 unsigned long startTime = 0;
@@ -238,7 +238,7 @@ void initI2SMic() {
     .mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_RX),
     .sample_rate = SAMPLE_RATE,
     .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
     .communication_format = I2S_COMM_FORMAT_I2S_MSB,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
     .dma_buf_count = 4,
@@ -439,31 +439,31 @@ void sendAudioData(bool firstFrame = false) {
   lastSendTime = currentMillis;  // 更新发送时间
 
   // 读取 I2S 音频数据
-  esp_err_t result = i2s_read(I2S_NUM_1, buffer, FRAME_SIZE, &bytesRead, portMAX_DELAY);
+  esp_err_t result = i2s_read(I2S_NUM_1, buffer, sizeof(buffer), &bytesRead, portMAX_DELAY);
   if (result != ESP_OK || bytesRead == 0) {
     Serial.println("[tts2text]I2S Read Failed or No Data!");
     return;
   }
 
-  // Base64 编码
-  String base64Audio = base64Encode(buffer, bytesRead);
-  if (base64Audio.length() == 0) {
-    Serial.println("[tts2text]Base64 Encoding Failed!");
+  if (bytesRead != FRAME_SIZE) {
+    Serial.printf("[tts2text]数据不足一帧: %d 字节\n", bytesRead);
     return;
   }
 
+  String encodedStr = base64Encode(buffer, bytesRead);
+
   // 发送 JSON 数据
-  DynamicJsonDocument jsonDoc(2048);
+  DynamicJsonDocument jsonDoc(4096);
   jsonDoc["data"]["status"] = firstFrame ? 0 : 1;  // 第一帧 status = 0，其他帧 status = 1
   jsonDoc["data"]["format"] = "audio/L16;rate=16000";
   jsonDoc["data"]["encoding"] = "raw";
-  jsonDoc["data"]["audio"] = base64Audio;  // 确保 Base64 编码成功
+  jsonDoc["data"]["audio"] = encodedStr;  // 确保 Base64 编码成功
 
-  char jsonBuffer[2048];
-  serializeJson(jsonDoc, jsonBuffer);
-  Serial.printf("[tts2text]jsonBuffer %s\n", jsonBuffer);
+  String jsonStr;
+  serializeJson(jsonDoc, jsonStr);
+  Serial.printf("[tts2text]jsonStr len=%d\n", jsonStr.length());
 
-  if (!wsSpeech.send(jsonBuffer)) {
+  if (!wsSpeech.send(jsonStr)) {
     Serial.println("[tts2text]数据发送失败");
   } else {
     Serial.println("[tts2text]数据发送成功");
@@ -482,14 +482,24 @@ void sendTTSRequest(const String& text) {
   business["speed"] = 50;
   JsonObject data = doc.createNestedObject("data");
   data["status"] = 2;
-  // TODO text转换成base64数据
-  // 使用mbedtls的base64编码替换原来的代码
-  size_t outputLen;
-  unsigned char* buffer = (unsigned char*)malloc(text.length() * 2);  // 确保足够的空间
-  mbedtls_base64_encode(buffer, text.length() * 2, &outputLen,
-                        (const unsigned char*)text.c_str(), text.length());
-  data["text"] = String((char*)buffer);
-  free(buffer);
+
+  // 正确的 base64 编码 UTF-8 文本
+  const char* utf8Text = text.c_str();
+  size_t utf8Len = strlen(utf8Text);
+
+  size_t b64Len = 0;
+  mbedtls_base64_encode(NULL, 0, &b64Len, (const unsigned char*)utf8Text, utf8Len);
+  unsigned char* b64 = (unsigned char*)malloc(b64Len + 1);
+  memset(b64, 0, b64Len + 1);
+
+  int ret = mbedtls_base64_encode(b64, b64Len, &b64Len, (const unsigned char*)utf8Text, utf8Len);
+  if (ret == 0) {
+    data["text"] = String((char*)b64);
+  } else {
+    Serial.println("[TTS] base64编码失败");
+  }
+  free(b64);
+
   // data["text"] = ;
   String output;
   serializeJson(doc, output);
@@ -503,41 +513,39 @@ void sendTTSRequest(const String& text) {
 
 void playAudio(String base64PcmData) {
   Serial.println("[audio]playAudio");
-  // 先计算输出 buffer 长度
-  size_t output_len = 0;
-  int ret = mbedtls_base64_decode(NULL, 0, &output_len,
-                                  (const unsigned char*)base64PcmData.c_str(),
-                                  base64PcmData.length());
-  if (ret != MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL) {
-    Serial.println("[audio]Base64长度计算失败");
-    return;
+
+  const char* response = base64PcmData.c_str();
+  int response_len = base64PcmData.length();
+
+  char encoded[CHUNK_SIZE + 1];             // 用于 base64 编码数据（加1以防万一）
+  uint8_t decoded[CHUNK_SIZE * 3 / 4 + 4];  // 解码后最大可能长度，加4防止 padding 出错
+
+  for (int i = 0; i < response_len; i += CHUNK_SIZE) {
+    int remaining = min(CHUNK_SIZE, response_len - i);
+
+    memcpy(encoded, response + i, remaining);
+    encoded[remaining] = '\0';  // 确保以 null 结尾（某些库需要）
+
+    int decoded_length = Base64_Arturo.decode((char*)decoded, encoded, remaining);
+    if (decoded_length <= 0) {
+      Serial.println("[audio] 解码失败");
+      continue;
+    }
+
+    size_t bytes_written = 0;
+    esp_err_t err = i2s_write(I2S_NUM_0, decoded, decoded_length, &bytes_written, portMAX_DELAY);
+    if (err != ESP_OK) {
+      Serial.printf("[audio] i2s_write failed: 0x%x\n", err);
+    } else {
+      Serial.printf("[audio] i2s_write success, bytes_written: %d\n", bytes_written);
+    }
+
+    delay(10);  // 可调节
   }
 
-  unsigned char* decodedBuffer = new unsigned char[output_len];
-  if (!decodedBuffer) {
-    Serial.println("[audio]内存分配失败");
-    return;
-  }
-
-  ret = mbedtls_base64_decode(decodedBuffer, output_len, &output_len,
-                              (const unsigned char*)base64PcmData.c_str(),
-                              base64PcmData.length());
-  if (ret != 0) {
-    Serial.println("[audio]Base64解码失败");
-    delete[] decodedBuffer;
-    return;
-  }
-
-  size_t bytes_written = 0;
+  // 所有数据播放完成后再清空 / 停止
   i2s_zero_dma_buffer(I2S_NUM_0);
-  esp_err_t err = i2s_write(I2S_NUM_0, decodedBuffer, output_len, &bytes_written, portMAX_DELAY);
-  if (err != ESP_OK) {
-    Serial.printf("[audio] i2s_write failed with error: 0x%x\n", err);
-  } else {
-    Serial.printf("[audio] i2s_write success, bytes_written: %d\n", bytes_written);
-    i2s_zero_dma_buffer(I2S_NUM_0);  // 清除 DMA 缓冲，避免重复播放
-    i2s_stop(I2S_NUM_0);             // 停止 I2S 传
-  }
+  i2s_stop(I2S_NUM_0);
 }
 
 void txt2TTS(String text) {
@@ -561,9 +569,8 @@ void txt2TTS(String text) {
         }
         int status = doc["data"]["status"];
         ttsAudioBase64 = doc["data"]["audio"].as<String>();
-        Serial.println("[TTS]当前累计回复：" + ttsAudioBase64);
+        playAudio(ttsAudioBase64);
         if (status == 2) {
-          playAudio(ttsAudioBase64);
           wsTTS.close();  //关闭连接
         }
       } else {
@@ -601,7 +608,7 @@ void sendChatRequest(const String& userInput) {
   // 系统提示（可根据需要修改）
   JsonObject systemMsg = textArr.createNestedObject();
   systemMsg["role"] = "system";
-  systemMsg["content"] = "你是个翻译员,给一个单词或者短句,你只返回中文和英文单词即可。用|分割。举例输入:苹果的英文怎么说,输出: 苹果|apple";
+  systemMsg["content"] = "你是个翻译员,给一个单词或者短句,你返回对应的英语";
   // 用户输入，使用语音识别的结果
   JsonObject userMsg = textArr.createNestedObject();
   userMsg["role"] = "user";
@@ -638,21 +645,17 @@ void processSpeechResult() {
         return;
       }
       int code = doc["header"]["code"];
+      int status = doc["header"]["status"];
       if (code == 0) {
-        // 提取当前回复内容和序号
-        int seq = doc["payload"]["choices"]["seq"];
         String content = doc["payload"]["choices"]["text"][0]["content"].as<String>();
-        // 如果是第一条回复，直接赋值；否则在前面添加“，”再累加
-        if (seq == 0) {
-          chatAggregated = content;
-        } else {
-          chatAggregated += content;
-        }
+        chatAggregated += content;
+      } else {
+        Serial.println("[chat]请求失败，错误码：" + String(code));
+      }
+      if (status == 2) {
         Serial.println("[chat]当前累计回复：" + chatAggregated);
         wsChat.close();  //关闭连接
         txt2TTS(chatAggregated);
-      } else {
-        Serial.println("[chat]请求失败，错误码：" + String(code));
       }
     });
     bool connected = wsChat.connect(chatURL);
@@ -972,3 +975,44 @@ String hmacSHA256(const String& key, const String& data) {
   mbedtls_base64_encode(base64Result, sizeof(base64Result), &outLen, hmacResult, sizeof(hmacResult));
   return String((char*)base64Result);
 }
+
+
+// String base64Encode(const uint8_t* data, size_t len) {
+//   const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+//   String encoded = "";
+//   int i = 0;
+//   uint8_t char_array_3[3];
+//   uint8_t char_array_4[4];
+
+//   while (len--) {
+//     char_array_3[i++] = *(data++);
+//     if (i == 3) {
+//       char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
+//       char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
+//       char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
+//       char_array_4[3] = char_array_3[2] & 0x3f;
+
+//       for (i = 0; i < 4; i++)
+//         encoded += base64_chars[char_array_4[i]];
+//       i = 0;
+//     }
+//   }
+
+//   if (i) {
+//     for (int j = i; j < 3; j++)
+//       char_array_3[j] = '\0';
+
+//     char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
+//     char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
+//     char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
+//     char_array_4[3] = char_array_3[2] & 0x3f;
+
+//     for (int j = 0; j < i + 1; j++)
+//       encoded += base64_chars[char_array_4[j]];
+
+//     while (i++ < 3)
+//       encoded += '=';
+//   }
+
+//   return encoded;
+// }
