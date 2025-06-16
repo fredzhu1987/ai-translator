@@ -11,7 +11,7 @@
 #include <ArduinoWebsockets.h>  //https://github.com/gilmaimon/ArduinoWebsockets
 #include <NTPClient.h>
 #include <Base64_Arturo.h>
-
+#include <base64.h>
 using namespace websockets;
 
 
@@ -78,6 +78,14 @@ unsigned long lastSendTime = 0;
 volatile bool isRecording = false;     // 当前是否正在录音
 volatile bool speechFinished = false;  // 语音识别结果是否返回（结束帧
 
+
+int16_t audioData[2560];
+int16_t* pcm_data;  //录音缓存区
+uint recordingSize = 0;
+#define I2S_PORT_0 I2S_NUM_0
+#define SAMPLE_RATE 16000
+#define RECORD_TIME_SECONDS 60
+#define BUFFER_SIZE (SAMPLE_RATE * RECORD_TIME_SECONDS)
 
 // 时间ntp
 WiFiUDP udp;
@@ -235,14 +243,17 @@ void initButton() {
 // 初始化 I2S 麦克风
 void initI2SMic() {
   i2s_config_t i2s_config = {
-    .mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_RX),
+    .mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM),
     .sample_rate = SAMPLE_RATE,
     .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
     .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
     .communication_format = I2S_COMM_FORMAT_I2S_MSB,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 4,
-    .dma_buf_len = 512
+    .dma_buf_count = 8,
+    .dma_buf_len = 1024,
+    .use_apll = false,
+    .tx_desc_auto_clear = false,
+    .fixed_mclk = 0
   };
 
   const i2s_pin_config_t inmp441_pin_config = {
@@ -251,9 +262,9 @@ void initI2SMic() {
     .data_out_num = I2S_PIN_NO_CHANGE,
     .data_in_num = I2S_MIC_SD
   };
-  i2s_driver_install(I2S_NUM_1, &i2s_config, 0, NULL);
-  i2s_set_pin(I2S_NUM_1, &inmp441_pin_config);
-  i2s_zero_dma_buffer(I2S_NUM_1);
+  i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+  i2s_set_pin(I2S_NUM_0, &inmp441_pin_config);
+  i2s_zero_dma_buffer(I2S_NUM_0);
 }
 // 初始化 I2S 扬声器
 void initI2SSpeaker() {
@@ -274,8 +285,8 @@ void initI2SSpeaker() {
     .data_out_num = I2S_SPK_DIN,
     .data_in_num = I2S_PIN_NO_CHANGE
   };
-  i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
-  i2s_set_pin(I2S_NUM_0, &pin_config);
+  i2s_driver_install(I2S_NUM_1, &i2s_config, 0, NULL);
+  i2s_set_pin(I2S_NUM_1, &pin_config);
 
   Serial.println("initI2SSpeaker finished");
 }
@@ -428,42 +439,44 @@ void sendAudioData(bool firstFrame = false) {
   size_t bytesRead = 0;
   static unsigned long lastSendTime = 0;
 
-  unsigned long currentMillis = millis();
-
-  // 每40ms发送一次音频
-  if (currentMillis - lastSendTime < 40) {
-    Serial.println("[tts2text]不足40ms不发送数据");
-    return;  // 如果间隔不到40ms，不发送数据
-  }
-
-  lastSendTime = currentMillis;  // 更新发送时间
+  // unsigned long currentMillis = millis();
+  // // 每40ms发送一次音频
+  // if (currentMillis - lastSendTime < 40) {
+  //   Serial.println("[tts2text]不足40ms不发送数据");
+  //   return;  // 如果间隔不到40ms，不发送数据
+  // }
+  // lastSendTime = currentMillis;  // 更新发送时间
 
   // 读取 I2S 音频数据
-  esp_err_t result = i2s_read(I2S_NUM_1, buffer, sizeof(buffer), &bytesRead, portMAX_DELAY);
+  esp_err_t result = i2s_read(I2S_NUM_0, buffer, FRAME_SIZE, &bytesRead, portMAX_DELAY);
   if (result != ESP_OK || bytesRead == 0) {
     Serial.println("[tts2text]I2S Read Failed or No Data!");
     return;
   }
 
-  if (bytesRead != FRAME_SIZE) {
-    Serial.printf("[tts2text]数据不足一帧: %d 字节\n", bytesRead);
+  String base64Audio = base64Encode(buffer, bytesRead);
+  if (base64Audio.length() == 0) {
+    Serial.println("[tts2text]Base64 Encoding Failed!");
     return;
   }
 
-  String encodedStr = base64Encode(buffer, bytesRead);
 
   // 发送 JSON 数据
   DynamicJsonDocument jsonDoc(4096);
   jsonDoc["data"]["status"] = firstFrame ? 0 : 1;  // 第一帧 status = 0，其他帧 status = 1
   jsonDoc["data"]["format"] = "audio/L16;rate=16000";
   jsonDoc["data"]["encoding"] = "raw";
-  jsonDoc["data"]["audio"] = encodedStr;  // 确保 Base64 编码成功
+  jsonDoc["data"]["audio"] = base64Audio;  // 确保 Base64 编码成功
 
-  String jsonStr;
-  serializeJson(jsonDoc, jsonStr);
-  Serial.printf("[tts2text]jsonStr len=%d\n", jsonStr.length());
+  char jsonBuffer[2048];
+  serializeJson(jsonDoc, jsonBuffer);
 
-  if (!wsSpeech.send(jsonStr)) {
+  // String jsonStr;
+  // serializeJson(jsonDoc, jsonStr);
+  Serial.printf("[tts2text]jsonBuffer %s\n", jsonBuffer);
+
+
+  if (!wsSpeech.send(jsonBuffer)) {
     Serial.println("[tts2text]数据发送失败");
   } else {
     Serial.println("[tts2text]数据发送成功");
@@ -533,7 +546,7 @@ void playAudio(String base64PcmData) {
     }
 
     size_t bytes_written = 0;
-    esp_err_t err = i2s_write(I2S_NUM_0, decoded, decoded_length, &bytes_written, portMAX_DELAY);
+    esp_err_t err = i2s_write(I2S_NUM_1, decoded, decoded_length, &bytes_written, portMAX_DELAY);
     if (err != ESP_OK) {
       Serial.printf("[audio] i2s_write failed: 0x%x\n", err);
     } else {
@@ -544,8 +557,8 @@ void playAudio(String base64PcmData) {
   }
 
   // 所有数据播放完成后再清空 / 停止
-  i2s_zero_dma_buffer(I2S_NUM_0);
-  i2s_stop(I2S_NUM_0);
+  i2s_zero_dma_buffer(I2S_NUM_1);
+  i2s_stop(I2S_NUM_1);
 }
 
 void txt2TTS(String text) {
@@ -680,9 +693,9 @@ void startRecording() {
 
   isRecording = true;
   startTime = millis();
-  // sendAudioData(true);
   sendAudioData(false);
 }
+
 
 void stopRecording() {
   Serial.println("[btn]stopRecording");
@@ -786,10 +799,24 @@ void loop() {
   wsSpeech.poll();  //持续消息接受
   wsChat.poll();
   wsTTS.poll();
+
   // 持续发送音频数据
   if (isRecording) {
     sendAudioData(false);
   }
+
+  // while (isRecording) {  //开始循环录音，将录制结果保存在pcm_data中
+  //   size_t bytes_read = 0;
+  //   recordingSize = 0;
+  //   pcm_data = reinterpret_cast<int16_t*>(ps_malloc(BUFFER_SIZE * 2));
+  //   if (!pcm_data) {
+  //     Serial.println("Failed to allocate memory for pcm_data");
+  //   }
+  //   esp_err_t result = i2s_read(I2S_PORT_0, audioData, sizeof(audioData), &bytes_read, portMAX_DELAY);
+  //   memcpy(pcm_data + recordingSize, audioData, bytes_read);
+  //   recordingSize += bytes_read / 2;
+  // }
+
   processSpeechResult();
   processChatResult();
 }
@@ -904,44 +931,3 @@ String hmacSHA256(const String& key, const String& data) {
   mbedtls_base64_encode(base64Result, sizeof(base64Result), &outLen, hmacResult, sizeof(hmacResult));
   return String((char*)base64Result);
 }
-
-
-// String base64Encode(const uint8_t* data, size_t len) {
-//   const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-//   String encoded = "";
-//   int i = 0;
-//   uint8_t char_array_3[3];
-//   uint8_t char_array_4[4];
-
-//   while (len--) {
-//     char_array_3[i++] = *(data++);
-//     if (i == 3) {
-//       char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
-//       char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
-//       char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
-//       char_array_4[3] = char_array_3[2] & 0x3f;
-
-//       for (i = 0; i < 4; i++)
-//         encoded += base64_chars[char_array_4[i]];
-//       i = 0;
-//     }
-//   }
-
-//   if (i) {
-//     for (int j = i; j < 3; j++)
-//       char_array_3[j] = '\0';
-
-//     char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
-//     char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
-//     char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
-//     char_array_4[3] = char_array_3[2] & 0x3f;
-
-//     for (int j = 0; j < i + 1; j++)
-//       encoded += base64_chars[char_array_4[j]];
-
-//     while (i++ < 3)
-//       encoded += '=';
-//   }
-
-//   return encoded;
-// }
