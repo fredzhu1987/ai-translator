@@ -243,10 +243,10 @@ void initButton() {
 // 初始化 I2S 麦克风
 void initI2SMic() {
   i2s_config_t i2s_config = {
-    .mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM),
+    .mode = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM),
     .sample_rate = SAMPLE_RATE,
     .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
     .communication_format = I2S_COMM_FORMAT_I2S_MSB,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
     .dma_buf_count = 4,
@@ -259,9 +259,24 @@ void initI2SMic() {
     .data_out_num = I2S_PIN_NO_CHANGE,
     .data_in_num = I2S_MIC_SD
   };
-  i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
-  i2s_set_pin(I2S_NUM_0, &inmp441_pin_config);
-  i2s_zero_dma_buffer(I2S_NUM_0);
+  esp_err_t err;
+  err = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+  if (err != ESP_OK) {
+    Serial.print("i2s_driver_install failed with error: ");
+    Serial.println(err);  // 打印出整数错误码
+  }
+  err = i2s_set_pin(I2S_NUM_0, &inmp441_pin_config);
+  if (err != ESP_OK) {
+    Serial.print("i2s_set_pin failed with error: ");
+    Serial.println(err);  // 打印出整数错误码
+  }
+  err = i2s_zero_dma_buffer(I2S_NUM_0);
+  if (err != ESP_OK) {
+    Serial.print("i2s_zero_dma_buffer failed with error: ");
+    Serial.println(err);  // 打印出整数错误码
+  }
+
+  Serial.println("initI2SMic finished");
 }
 // 初始化 I2S 扬声器
 void initI2SSpeaker() {
@@ -451,12 +466,12 @@ void sendAudioData(bool firstFrame = false) {
     return;
   }
 
-  String base64Audio = base64Encode(buffer, bytesRead);
+  // String base64Audio = base64Encode(buffer, bytesRead);
+  String base64Audio = base64_encode((uint8_t*)buffer, bytesRead);
   if (base64Audio.length() == 0) {
     Serial.println("[tts2text]Base64 Encoding Failed!");
     return;
   }
-
 
   // 发送 JSON 数据
   DynamicJsonDocument jsonDoc(4096);
@@ -788,6 +803,24 @@ void setup() {
   } else {
     Serial.println("系统尚未完成");
   }
+
+  // 采样 0.5 秒，查看数值范围
+  Serial.println("开始测试");
+  static uint8_t buffer[FRAME_SIZE];  // 音频数据缓冲区
+  size_t bytesRead = 0;
+  for (int i = 0; i < 100; i++) {
+    esp_err_t result = i2s_read(I2S_NUM_0, buffer, FRAME_SIZE * sizeof(int32_t), &bytesRead, 100 / portTICK_PERIOD_MS);
+    if (result != ESP_OK || bytesRead == 0) {
+      Serial.println("[tts2text]I2S Read Failed or No Data!");
+      return;
+    }
+
+    int32_t* samples = (int32_t*)buffer;
+    for (int j = 0; j < FRAME_SIZE; j += 8) {
+      Serial.println(samples[j] >> 14);  // 打印间隔点，避免爆刷
+    }
+  }
+  Serial.println("测试读取音频完成");
 }
 
 void loop() {
@@ -927,4 +960,42 @@ String hmacSHA256(const String& key, const String& data) {
   unsigned char base64Result[64];
   mbedtls_base64_encode(base64Result, sizeof(base64Result), &outLen, hmacResult, sizeof(hmacResult));
   return String((char*)base64Result);
+}
+
+const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+String base64_encode(uint8_t const* buf, unsigned int bufLen) {
+  String result;
+  int i = 0;
+  uint8_t array3[3];
+  uint8_t array4[4];
+
+  while (bufLen--) {
+    array3[i++] = *(buf++);
+    if (i == 3) {
+      array4[0] = (array3[0] & 0xfc) >> 2;
+      array4[1] = ((array3[0] & 0x03) << 4) + ((array3[1] & 0xf0) >> 4);
+      array4[2] = ((array3[1] & 0x0f) << 2) + ((array3[2] & 0xc0) >> 6);
+      array4[3] = array3[2] & 0x3f;
+
+      for (i = 0; i < 4; i++) {
+        result += base64_chars[array4[i]];
+      }
+      i = 0;
+    }
+  }
+
+  if (i) {
+    for (int j = i; j < 3; j++) array3[j] = '\0';
+
+    array4[0] = (array3[0] & 0xfc) >> 2;
+    array4[1] = ((array3[0] & 0x03) << 4) + ((array3[1] & 0xf0) >> 4);
+    array4[2] = ((array3[1] & 0x0f) << 2) + ((array3[2] & 0xc0) >> 6);
+    array4[3] = array3[2] & 0x3f;
+
+    for (int j = 0; j < i + 1; j++) result += base64_chars[array4[j]];
+    while ((i++ < 3)) result += '=';
+  }
+
+  return result;
 }
