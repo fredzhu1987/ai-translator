@@ -11,7 +11,7 @@
 #include <ArduinoWebsockets.h>  //https://github.com/gilmaimon/ArduinoWebsockets
 #include <NTPClient.h>
 #include <Base64_Arturo.h>
-#include <base64.h>
+
 using namespace websockets;
 
 
@@ -243,14 +243,17 @@ void initButton() {
 // 初始化 I2S 麦克风
 void initI2SMic() {
   i2s_config_t i2s_config = {
-    .mode = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM),
+    .mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_RX),
     .sample_rate = SAMPLE_RATE,
     .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
     .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
     .communication_format = I2S_COMM_FORMAT_I2S_MSB,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
     .dma_buf_count = 4,
-    .dma_buf_len = 512
+    .dma_buf_len = 512,
+    .use_apll = false,
+    .tx_desc_auto_clear = false,
+    .fixed_mclk = 0
   };
 
   const i2s_pin_config_t inmp441_pin_config = {
@@ -447,27 +450,28 @@ void connectToIFLY() {
 
 void sendAudioData(bool firstFrame = false) {
   Serial.println("[tts2text]sendAudioData");
-  static uint8_t buffer[FRAME_SIZE];  // 音频数据缓冲区
+  static int16_t buffer[FRAME_SIZE];  // 音频数据缓冲区
   size_t bytesRead = 0;
   static unsigned long lastSendTime = 0;
 
-  // unsigned long currentMillis = millis();
-  // // 每40ms发送一次音频
-  // if (currentMillis - lastSendTime < 40) {
-  //   Serial.println("[tts2text]不足40ms不发送数据");
-  //   return;  // 如果间隔不到40ms，不发送数据
-  // }
-  // lastSendTime = currentMillis;  // 更新发送时间
+  unsigned long currentMillis = millis();
+  // 每40ms发送一次音频
+  if (currentMillis - lastSendTime < 40) {
+    Serial.println("[tts2text]不足40ms不发送数据");
+    return;  // 如果间隔不到40ms，不发送数据
+  }
+  lastSendTime = currentMillis;  // 更新发送时间
 
   // 读取 I2S 音频数据
-  esp_err_t result = i2s_read(I2S_NUM_0, buffer, FRAME_SIZE, &bytesRead, portMAX_DELAY);
+  // esp_err_t result = i2s_read(I2S_NUM_0, buffer, sizeof(buffer), &bytesRead, 100 / portTICK_PERIOD_MS);
+  esp_err_t result = i2s_read(I2S_NUM_0, buffer, sizeof(buffer), &bytesRead, portMAX_DELAY);
   if (result != ESP_OK || bytesRead == 0) {
     Serial.println("[tts2text]I2S Read Failed or No Data!");
     return;
   }
 
+  String base64Audio = base64Encode(reinterpret_cast<const uint8_t*>(buffer), bytesRead);
   // String base64Audio = base64Encode(buffer, bytesRead);
-  String base64Audio = base64_encode((uint8_t*)buffer, bytesRead);
   if (base64Audio.length() == 0) {
     Serial.println("[tts2text]Base64 Encoding Failed!");
     return;
@@ -480,7 +484,7 @@ void sendAudioData(bool firstFrame = false) {
   jsonDoc["data"]["encoding"] = "raw";
   jsonDoc["data"]["audio"] = base64Audio;  // 确保 Base64 编码成功
 
-  char jsonBuffer[2048];
+  char jsonBuffer[4096];
   serializeJson(jsonDoc, jsonBuffer);
 
   // String jsonStr;
@@ -805,22 +809,23 @@ void setup() {
   }
 
   // 采样 0.5 秒，查看数值范围
-  Serial.println("开始测试");
-  static uint8_t buffer[FRAME_SIZE];  // 音频数据缓冲区
-  size_t bytesRead = 0;
-  for (int i = 0; i < 100; i++) {
-    esp_err_t result = i2s_read(I2S_NUM_0, buffer, FRAME_SIZE * sizeof(int32_t), &bytesRead, 100 / portTICK_PERIOD_MS);
-    if (result != ESP_OK || bytesRead == 0) {
-      Serial.println("[tts2text]I2S Read Failed or No Data!");
-      return;
-    }
-
-    int32_t* samples = (int32_t*)buffer;
-    for (int j = 0; j < FRAME_SIZE; j += 8) {
-      Serial.println(samples[j] >> 14);  // 打印间隔点，避免爆刷
-    }
-  }
-  Serial.println("测试读取音频完成");
+  // Serial.println("开始测试");
+  // static int32_t buffer[FRAME_SIZE];  // ✅ 正确类型，匹配 32bit 采样
+  // size_t bytesRead = 0;
+  // for (int i = 0; i < 100; i++) {
+  //   // esp_err_t result = i2s_read(I2S_NUM_0, buffer, FRAME_SIZE * sizeof(int32_t), &bytesRead, 100 / portTICK_PERIOD_MS);
+  //   esp_err_t result = i2s_read(I2S_NUM_0, buffer, sizeof(buffer), &bytesRead, 100 / portTICK_PERIOD_MS);
+  //   if (result != ESP_OK || bytesRead == 0) {
+  //     Serial.println("[tts2text]I2S Read Failed or No Data!");
+  //     continue;
+  //   }
+  //   int samplesRead = bytesRead / sizeof(int32_t);
+  //   for (int j = 0; j < samplesRead; j += 8) {  // 每8点采样1个，避免爆刷
+  //     Serial.println(buffer[j] >> 14);          // INMP441 有效数据在中间24位，右移14提取
+  //   }
+  //   // Serial.println("测试读取音频完成,i=" + i);
+  // }
+  // Serial.println("测试读取音频完成");
 }
 
 void loop() {
@@ -834,18 +839,6 @@ void loop() {
   if (isRecording) {
     sendAudioData(false);
   }
-
-  // while (isRecording) {  //开始循环录音，将录制结果保存在pcm_data中
-  //   size_t bytes_read = 0;
-  //   recordingSize = 0;
-  //   pcm_data = reinterpret_cast<int16_t*>(ps_malloc(BUFFER_SIZE * 2));
-  //   if (!pcm_data) {
-  //     Serial.println("Failed to allocate memory for pcm_data");
-  //   }
-  //   esp_err_t result = i2s_read(I2S_PORT_0, audioData, sizeof(audioData), &bytes_read, portMAX_DELAY);
-  //   memcpy(pcm_data + recordingSize, audioData, bytes_read);
-  //   recordingSize += bytes_read / 2;
-  // }
 
   processSpeechResult();
   processChatResult();
@@ -945,7 +938,6 @@ String base64Encode(const uint8_t* data, size_t len) {
   free(buf);
   return encoded;
 }
-
 
 String hmacSHA256(const String& key, const String& data) {
   unsigned char hmacResult[32];
