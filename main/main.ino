@@ -501,6 +501,8 @@ void sendAudioData(bool firstFrame = false) {
 
 void sendTTSRequest(const String& text) {
   Serial.println("[TTS]sendTTSRequest text:" + text);
+  sendMsg("", text);
+
   DynamicJsonDocument doc(2048);
   JsonObject common = doc.createNestedObject("common");
   common["app_id"] = globalConfig.appid;
@@ -808,24 +810,8 @@ void setup() {
     Serial.println("系统尚未完成");
   }
 
-  // 采样 0.5 秒，查看数值范围
-  // Serial.println("开始测试");
-  // static int32_t buffer[FRAME_SIZE];  // ✅ 正确类型，匹配 32bit 采样
-  // size_t bytesRead = 0;
-  // for (int i = 0; i < 100; i++) {
-  //   // esp_err_t result = i2s_read(I2S_NUM_0, buffer, FRAME_SIZE * sizeof(int32_t), &bytesRead, 100 / portTICK_PERIOD_MS);
-  //   esp_err_t result = i2s_read(I2S_NUM_0, buffer, sizeof(buffer), &bytesRead, 100 / portTICK_PERIOD_MS);
-  //   if (result != ESP_OK || bytesRead == 0) {
-  //     Serial.println("[tts2text]I2S Read Failed or No Data!");
-  //     continue;
-  //   }
-  //   int samplesRead = bytesRead / sizeof(int32_t);
-  //   for (int j = 0; j < samplesRead; j += 8) {  // 每8点采样1个，避免爆刷
-  //     Serial.println(buffer[j] >> 14);          // INMP441 有效数据在中间24位，右移14提取
-  //   }
-  //   // Serial.println("测试读取音频完成,i=" + i);
-  // }
-  // Serial.println("测试读取音频完成");
+
+  txt2TTS("How are you？");
 }
 
 void loop() {
