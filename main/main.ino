@@ -510,10 +510,10 @@ void sendAudioData(bool firstFrame = false) {
 
   // String jsonStr;
   // serializeJson(jsonDoc, jsonStr);
-  Serial.printf("[tts2text]jsonBufferStr %s\n", jsonBufferStr.c_str());
+  // Serial.printf("[tts2text]jsonBufferStr %s\n", jsonBufferStr.c_str());
 
 
-  if (!wsSpeech.send(jsonBufferStr)) {
+  if (!wsSpeech.send(jsonBufferStr.c_str())) {
     Serial.println("[tts2text]数据发送失败");
   } else {
     Serial.println("[tts2text]数据发送成功");
@@ -566,37 +566,54 @@ void sendTTSRequest(const String& text) {
 void playAudio(String base64Str) {
   Serial.println("[audio]playAudio");
 
-  // 1. 计算解码后需要的最大长度
-  int inputLen = base64Str.length();
-  int outputMaxLen = inputLen * 3 / 4;
+  // 清洗 base64 字符串
+  base64Str.replace("\n", "");
+  base64Str.replace("\r", "");
+  base64Str.replace(" ", "");
 
-  // 2. 为 PCM 数据分配内存
-  uint8_t* decodedAudio = (uint8_t*)malloc(outputMaxLen);
+  size_t inputLen = base64Str.length();
+  size_t maxOutputLen = inputLen * 3 / 4;
+
+  uint8_t* decodedAudio = (uint8_t*)malloc(maxOutputLen);
   if (!decodedAudio) {
-    Serial.println("❌ 音频内存分配失败");
+    Serial.println("❌ 内存分配失败");
     return;
   }
 
-  // 3. 将 String 转为 C 字符串
-  const char* base64_cstr = base64Str.c_str();
+  size_t outputLen = 0;
+  int ret = mbedtls_base64_decode(decodedAudio, maxOutputLen, &outputLen,
+                                  (const unsigned char*)base64Str.c_str(), inputLen);
+  if (ret != 0) {
+    Serial.printf("❌ Base64 解码失败，错误码: %d\n", ret);
+    free(decodedAudio);
+    return;
+  }
+  Serial.printf("✅ 解码成功，字节数: %d\n", outputLen);
 
-  // 4. 解码 Base64（使用你前面提供的函数）
-  int actualLen = decode_base64(base64_cstr, decodedAudio);
-  Serial.printf("✅ 解码音频字节数: %d\n", actualLen);
+  // **确保启动I2S**
+  i2s_start(I2S_NUM_1);
+  // 分段写入 I2S，每次写 512 字节（根据你缓冲大小调整）
+  size_t offset = 0;
+  size_t chunkSize = 512;
+  while (offset < outputLen) {
+    size_t toWrite = (outputLen - offset) > chunkSize ? chunkSize : (outputLen - offset);
+    size_t bytes_written = 0;
+    esp_err_t ret = i2s_write(I2S_NUM_1, decodedAudio + offset, toWrite, &bytes_written, 100 / portTICK_PERIOD_MS);
+    if (ret != ESP_OK) {
+      Serial.printf("❌ I2S 写入失败: %d\n", ret);
+      break;
+    }
+    offset += bytes_written;
+  }
 
-  // 5. 写入 I2S 播放
-  size_t bytes_written = 0;
-  i2s_write(I2S_NUM_1, decodedAudio, actualLen, &bytes_written, 100 / portTICK_PERIOD_MS);
-  Serial.printf("🔊 播放完成，I2S写入字节数: %d\n", bytes_written);
-
-  // 6. 释放内存
   free(decodedAudio);
 
-  // 所有数据播放完成后再清空 / 停止
+  // 这里可加适当 delay 或等待播放完毕逻辑
+  delay(100);
+
   i2s_zero_dma_buffer(I2S_NUM_1);
   i2s_stop(I2S_NUM_1);
 }
-
 void txt2TTS(String text) {
   if (!wsTTS.available()) {
     String ttsURL = generateXunFeiAuthURL(ttsHost, ttsPath);
@@ -1023,22 +1040,32 @@ int base64CharToValue(char c) {
   return 0;
 }
 
-int decode_base64(const char* input, uint8_t* output) {
-  int len = strlen(input);
-  int i = 0, j = 0;
-  uint32_t buf = 0;
-  int valb = -8;
+// int decode_base64(const char* input, uint8_t* output) {
+//   size_t output_len = 0;
+//   int ret = mbedtls_base64_decode(output, 8192, &output_len, (const unsigned char*)input, strlen(input));
+//   if (ret != 0) {
+//     Serial.printf("Base64 解码失败，错误码 %d\n", ret);
+//     return 0;
+//   }
+//   return output_len;
+// }
 
-  while (i < len) {
-    char c = input[i++];
-    if (c == '=') break;
-    int val = base64CharToValue(c);
-    buf = (buf << 6) | val;
-    valb += 6;
-    if (valb >= 0) {
-      output[j++] = (buf >> valb) & 0xFF;
-      valb -= 8;
-    }
-  }
-  return j;  // 实际解码的字节数
-}
+// int decode_base64(const char* input, uint8_t* output) {
+//   int len = strlen(input);
+//   int i = 0, j = 0;
+//   uint32_t buf = 0;
+//   int valb = -8;
+
+//   while (i < len) {
+//     char c = input[i++];
+//     if (c == '=') break;
+//     int val = base64CharToValue(c);
+//     buf = (buf << 6) | val;
+//     valb += 6;
+//     if (valb >= 0) {
+//       output[j++] = (buf >> valb) & 0xFF;
+//       valb -= 8;
+//     }
+//   }
+//   return j;  // 实际解码的字节数
+// }
