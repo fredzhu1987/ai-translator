@@ -570,54 +570,48 @@ void sendTTSRequest(const String& text) {
 void playAudio(String base64Str) {
   Serial.println("[audio]playAudio");
 
-  // 清洗 base64 字符串
   base64Str.replace("\n", "");
   base64Str.replace("\r", "");
   base64Str.replace(" ", "");
 
-  size_t inputLen = base64Str.length();
-  size_t maxOutputLen = inputLen * 3 / 4;
+  if (base64Str.length() % 4 != 0) {
+    Serial.println("⚠️ base64 长度非法");
+    return;
+  }
 
-  uint8_t* decodedAudio = (uint8_t*)malloc(maxOutputLen);
-  if (!decodedAudio) {
+  size_t inputLen = base64Str.length();
+  size_t maxChunkInputLen = 768;  // 每次处理 768 个字符，输出约 576 字节
+  uint8_t* decodeBuf = (uint8_t*)malloc(576);
+  if (!decodeBuf) {
     Serial.println("❌ 内存分配失败");
     return;
   }
 
-  size_t outputLen = 0;
-  int ret = mbedtls_base64_decode(decodedAudio, maxOutputLen, &outputLen,
-                                  (const unsigned char*)base64Str.c_str(), inputLen);
-  if (ret != 0) {
-    Serial.printf("❌ Base64 解码失败，错误码: %d\n", ret);
-    free(decodedAudio);
-    return;
-  }
-  Serial.printf("✅ 解码成功，字节数: %d\n", outputLen);
-
-  // **确保启动I2S**
   i2s_start(I2S_NUM_1);
-  // 分段写入 I2S，每次写 512 字节（根据你缓冲大小调整）
-  size_t offset = 0;
-  size_t chunkSize = 512;
-  while (offset < outputLen) {
-    size_t toWrite = (outputLen - offset) > chunkSize ? chunkSize : (outputLen - offset);
-    size_t bytes_written = 0;
-    esp_err_t ret = i2s_write(I2S_NUM_1, decodedAudio + offset, toWrite, &bytes_written, 100 / portTICK_PERIOD_MS);
-    if (ret != ESP_OK) {
-      Serial.printf("❌ I2S 写入失败: %d\n", ret);
+
+  for (size_t offset = 0; offset < inputLen; offset += maxChunkInputLen) {
+    size_t chunkLen = (inputLen - offset) > maxChunkInputLen ? maxChunkInputLen : (inputLen - offset);
+    size_t outputLen = 0;
+    int ret = mbedtls_base64_decode(
+      decodeBuf, 576, &outputLen,
+      (const unsigned char*)base64Str.substring(offset, offset + chunkLen).c_str(), chunkLen);
+
+    if (ret != 0) {
+      Serial.printf("❌ 解码失败 %d\n", ret);
       break;
     }
-    offset += bytes_written;
+
+    size_t written = 0;
+    i2s_write(I2S_NUM_1, decodeBuf, outputLen, &written, portMAX_DELAY);
   }
 
-  free(decodedAudio);
-
-  // 这里可加适当 delay 或等待播放完毕逻辑
+  free(decodeBuf);
   delay(100);
-
   i2s_zero_dma_buffer(I2S_NUM_1);
   i2s_stop(I2S_NUM_1);
 }
+
+
 void txt2TTS(String text) {
   if (wsTTS.available()) {
     wsTTS.close();
