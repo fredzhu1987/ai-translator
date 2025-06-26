@@ -436,8 +436,6 @@ void connectToIFLY() {
       }
       tempText.trim();
       speechText = tempText;
-      Serial.println("[tts2text]识别结果 tempText：" + tempText);
-      // speechText = "你好英文怎么说";
       Serial.println("[tts2text]识别结果 speechText：" + speechText);
       wsSpeech.close();  //关闭连接
     }
@@ -535,28 +533,34 @@ void sendTTSRequest(const String& text) {
   JsonObject data = doc.createNestedObject("data");
   data["status"] = 2;
 
-  // 正确的 base64 编码 UTF-8 文本
   const char* utf8Text = text.c_str();
   size_t utf8Len = strlen(utf8Text);
 
   size_t b64Len = 0;
-  mbedtls_base64_encode(NULL, 0, &b64Len, (const unsigned char*)utf8Text, utf8Len);
-  unsigned char* b64 = (unsigned char*)malloc(b64Len + 1);
-  memset(b64, 0, b64Len + 1);
+  mbedtls_base64_encode(NULL, 0, &b64Len, (const unsigned char*)utf8Text, utf8Len);  // 先获取需要长度
 
-  int ret = mbedtls_base64_encode(b64, b64Len, &b64Len, (const unsigned char*)utf8Text, utf8Len);
+  unsigned char* b64 = (unsigned char*)malloc(b64Len);
+  if (!b64) {
+    Serial.println("[TTS] malloc失败");
+    return;
+  }
+  memset(b64, 0, b64Len);
+
+  size_t actualLen = 0;
+  int ret = mbedtls_base64_encode(b64, b64Len, &actualLen, (const unsigned char*)utf8Text, utf8Len);
   if (ret == 0) {
-    data["text"] = String((char*)b64);
+    data["text"] = String((char*)b64, actualLen);
   } else {
-    Serial.println("[TTS] base64编码失败");
+    Serial.printf("[TTS] base64编码失败，错误码: -0x%04X\n", -ret);
+    free(b64);
+    return;
   }
   free(b64);
 
-  // data["text"] = ;
   String output;
   serializeJson(doc, output);
   Serial.println("[TTS]数据发送,output:" + output);
-  if (!wsTTS.send(output)) {
+  if (!wsTTS.send(output.c_str())) {
     Serial.println("[TTS]数据发送失败");
   } else {
     Serial.println("[TTS]数据发送成功");
@@ -615,6 +619,9 @@ void playAudio(String base64Str) {
   i2s_stop(I2S_NUM_1);
 }
 void txt2TTS(String text) {
+  if (wsTTS.available()) {
+    wsTTS.close();
+  }
   if (!wsTTS.available()) {
     String ttsURL = generateXunFeiAuthURL(ttsHost, ttsPath);
     Serial.println("[TTS]连接 URL：" + ttsURL);
@@ -682,7 +689,7 @@ void sendChatRequest(const String& userInput) {
   String output;
   serializeJson(doc, output);
   Serial.println("[chat]发送内容 output:" + output);
-  if (!wsChat.send(output)) {
+  if (!wsChat.send(output.c_str())) {
     Serial.println("[chat]数据发送失败");
   } else {
     Serial.println("[chat]数据发送成功");
@@ -698,6 +705,10 @@ void processSpeechResult() {
     return;
   }
   Serial.println("[chat]speechText:" + speechText);
+  chatAggregated = "";
+  if (wsChat.available()) {
+    wsChat.close();
+  }
   if (!wsChat.available()) {
     String chatURL = generateXunFeiAuthURL(chatHost, chatPath);
     Serial.println("[chat]大模型对话WS URL:" + chatURL);
@@ -780,16 +791,18 @@ void handleRelease1() {
   if (isRecording) {
     stopRecording();
   }
-  sendMsg("", "[btn]按钮1松开");
+  // sendMsg("", "[btn]按钮1松开");
 }
 
 
 void handlePress2() {
-  sendMsg("", "[btn]重播");
+  // sendMsg("", "[btn]重播");
+  // playAudio(ttsAudioBase64);
 }
 
 void handleRelease2() {
-  sendMsg("", "[btn]按钮2松开");
+  playAudio(ttsAudioBase64);
+  // sendMsg("", "[btn]按钮2松开");
 }
 
 void initButtonListener() {
