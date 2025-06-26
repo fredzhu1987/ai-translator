@@ -216,15 +216,15 @@ bool loadConfig() {
   globalConfig.appid = doc["appid"].as<String>();
   globalConfig.apikey = doc["apikey"].as<String>();
   globalConfig.apisecret = doc["apisecret"].as<String>();
-  globalConfig.ttsapikey = doc["ttsapikey"].as<String>();
   // 空数据的时候
   if (globalConfig.ssid == "" || globalConfig.pass == "") {
     sendMsg("请先链接热点配置系统", "http://192.168.4.1:8080/");
     file.close();
     return false;
   }
-  Serial.printf("ssid=%s,pass=%s", globalConfig.ssid, globalConfig.pass);
-  Serial.printf("appid=%s,apikey=%s,apisecret=%s,ttsapikey=%s", globalConfig.appid, globalConfig.apikey, globalConfig.apisecret, globalConfig.ttsapikey);
+  Serial.printf("ssid=%s,pass=%s", globalConfig.ssid.c_str(), globalConfig.pass.c_str());
+  Serial.printf("appid=%s,apikey=%s,apisecret=%s", globalConfig.appid.c_str(), globalConfig.apikey.c_str(), globalConfig.apisecret.c_str());
+  Serial.println("");
 
   // 关闭文件
   file.close();
@@ -353,7 +353,11 @@ void initServer() {
     String appid = server.arg("appid");
     String apikey = server.arg("apikey");
     String apisecret = server.arg("apisecret");
-    // String ttsapikey = server.arg("ttsapikey");
+    Serial.println("initServer ssid = " + ssid);
+    Serial.println("initServer pass = " + pass);
+    Serial.println("initServer appid = " + appid);
+    Serial.println("initServer apikey = " + apikey);
+    Serial.println("initServer apisecret = " + apisecret);
     // 创建JSON文档
     DynamicJsonDocument doc(2048);
     doc["ssid"] = ssid;
@@ -361,7 +365,6 @@ void initServer() {
     doc["appid"] = appid;
     doc["apikey"] = apikey;
     doc["apisecret"] = apisecret;
-    // doc["ttsapikey"] = ttsapikey;
     // 保存到SPIFFS
     File file = SPIFFS.open(configFile, "w");
     if (!file) {
@@ -409,6 +412,9 @@ void listenButtonEvent(uint8_t pin, bool& lastState, void (*onPress)(), void (*o
 
 void connectToIFLY() {
   String wsUrl = generateXunFeiAuthURL(speechHost, speechPath);
+  if (wsSpeech.available()) {
+    wsSpeech.close();
+  }
   bool connected = wsSpeech.connect(wsUrl);
   wsSpeech.onMessage([](WebsocketsMessage message) {
     Serial.println("[tts2text]返回内容: " + message.data());
@@ -484,7 +490,8 @@ void sendAudioData(bool firstFrame = false) {
     return;
   }
 
-  String base64Audio = base64Encode(reinterpret_cast<const uint8_t*>(buffer), bytesRead);
+  String base64Audio = base64Encode((uint8_t*)buffer, bytesRead);
+  // String base64Audio = base64Encode(reinterpret_cast<const uint8_t*>(buffer), bytesRead);
   // String base64Audio = base64Encode(buffer, bytesRead);
   if (base64Audio.length() == 0) {
     Serial.println("[tts2text]Base64 Encoding Failed!");
@@ -492,21 +499,21 @@ void sendAudioData(bool firstFrame = false) {
   }
 
   // 发送 JSON 数据
-  DynamicJsonDocument jsonDoc(4096);
+  DynamicJsonDocument jsonDoc(2048);
   jsonDoc["data"]["status"] = firstFrame ? 0 : 1;  // 第一帧 status = 0，其他帧 status = 1
   jsonDoc["data"]["format"] = "audio/L16;rate=16000";
   jsonDoc["data"]["encoding"] = "raw";
   jsonDoc["data"]["audio"] = base64Audio;  // 确保 Base64 编码成功
 
-  char jsonBuffer[4096];
-  serializeJson(jsonDoc, jsonBuffer);
+  String jsonBufferStr;
+  serializeJson(jsonDoc, jsonBufferStr);
 
   // String jsonStr;
   // serializeJson(jsonDoc, jsonStr);
-  Serial.printf("[tts2text]jsonBuffer %s\n", jsonBuffer);
+  Serial.printf("[tts2text]jsonBufferStr %s\n", jsonBufferStr.c_str());
 
 
-  if (!wsSpeech.send(jsonBuffer)) {
+  if (!wsSpeech.send(jsonBufferStr)) {
     Serial.println("[tts2text]数据发送失败");
   } else {
     Serial.println("[tts2text]数据发送成功");
@@ -579,12 +586,12 @@ void playAudio(String base64Str) {
 
   // 5. 写入 I2S 播放
   size_t bytes_written = 0;
-  i2s_write(I2S_NUM_1, decodedAudio, actualLen, &bytes_written, portMAX_DELAY);
+  i2s_write(I2S_NUM_1, decodedAudio, actualLen, &bytes_written, 100 / portTICK_PERIOD_MS);
   Serial.printf("🔊 播放完成，I2S写入字节数: %d\n", bytes_written);
 
   // 6. 释放内存
   free(decodedAudio);
-  
+
   // 所有数据播放完成后再清空 / 停止
   i2s_zero_dma_buffer(I2S_NUM_1);
   i2s_stop(I2S_NUM_1);
@@ -820,9 +827,7 @@ void setup() {
   } else {
     Serial.println("系统尚未完成");
   }
-
-
-  txt2TTS("How are you？");
+  // txt2TTS("How are you？");
 }
 
 void loop() {
@@ -877,8 +882,8 @@ String generateXunFeiAuthURL(String host, String path) {
   String tmp = "host: " + String(host) + "\n";
   tmp += "date: " + date + "\n";
   tmp += "GET " + String(path) + " HTTP/1.1";
-  String signature = hmacSHA256(globalConfig.apisecret, tmp);
-  String authOrigin = "api_key=\"" + String(globalConfig.apikey) + "\", algorithm=\"hmac-sha256\", headers=\"host date request-line\", signature=\"" + signature + "\"";
+  String signature = hmacSHA256(globalConfig.apisecret.c_str(), tmp);
+  String authOrigin = "api_key=\"" + String(globalConfig.apikey.c_str()) + "\", algorithm=\"hmac-sha256\", headers=\"host date request-line\", signature=\"" + signature + "\"";
   unsigned char authBase64[256] = { 0 };
   size_t authLen = 0;
   int ret = mbedtls_base64_encode(authBase64, sizeof(authBase64) - 1, &authLen, (const unsigned char*)authOrigin.c_str(), authOrigin.length());
@@ -916,25 +921,44 @@ String getDate() {
   return String(timeString);
 }
 
-String base64Encode(const uint8_t* data, size_t len) {
-  if (len == 0 || data == nullptr) {
-    Serial.println("Base64编码错误：无数据");
-    return "";
-  }
+
+String base64Encode(const void* data, size_t len) {
+  if (!data || len == 0) return "";
+
   size_t outputLen = 0;
   size_t bufSize = ((len + 2) / 3) * 4 + 1;
   char* buf = (char*)malloc(bufSize);
-  if (!buf)
-    return "";
-  int ret = mbedtls_base64_encode((unsigned char*)buf, bufSize, &outputLen, data, len);
+  if (!buf) return "";
+
+  int ret = mbedtls_base64_encode((unsigned char*)buf, bufSize, &outputLen, (const unsigned char*)data, len);
   if (ret != 0) {
+    Serial.printf("Base64 编码失败，错误码：%d\n", ret);
     free(buf);
     return "";
   }
-  String encoded = String(buf);
+  String result(buf);
   free(buf);
-  return encoded;
+  return result;
 }
+// String base64Encode(const uint8_t* data, size_t len) {
+//   if (len == 0 || data == nullptr) {
+//     Serial.println("Base64编码错误：无数据");
+//     return "";
+//   }
+//   size_t outputLen = 0;
+//   size_t bufSize = ((len + 2) / 3) * 4 + 1;
+//   char* buf = (char*)malloc(bufSize);
+//   if (!buf)
+//     return "";
+//   int ret = mbedtls_base64_encode((unsigned char*)buf, bufSize, &outputLen, data, len);
+//   if (ret != 0) {
+//     free(buf);
+//     return "";
+//   }
+//   String encoded = String(buf);
+//   free(buf);
+//   return encoded;
+// }
 
 String hmacSHA256(const String& key, const String& data) {
   unsigned char hmacResult[32];
