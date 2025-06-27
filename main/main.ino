@@ -505,10 +505,7 @@ void sendAudioData(bool firstFrame = false) {
 
   String jsonBufferStr;
   serializeJson(jsonDoc, jsonBufferStr);
-
-  // String jsonStr;
-  // serializeJson(jsonDoc, jsonStr);
-  // Serial.printf("[tts2text]jsonBufferStr %s\n", jsonBufferStr.c_str());
+  Serial.printf("[tts2text]jsonBufferStr %s\n", jsonBufferStr.c_str());
 
 
   if (!wsSpeech.send(jsonBufferStr.c_str())) {
@@ -774,7 +771,7 @@ void stopRecording() {
 }
 
 void handlePress1() {
-  sendMsg("", "[btn]开始语音识别");
+  sendMsg("", "听取中...");
   connectToIFLY();
   if (!isRecording) {
     startRecording();
@@ -783,9 +780,9 @@ void handlePress1() {
 
 void handleRelease1() {
   if (isRecording) {
+    sendMsg("", "处理中...");
     stopRecording();
   }
-  // sendMsg("", "[btn]按钮1松开");
 }
 
 
