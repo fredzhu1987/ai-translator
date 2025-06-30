@@ -65,10 +65,8 @@ const char* chatPath = "/v4.0/chat";
 const char* ttsHost = "tts-api.xfyun.cn";
 const char* ttsPath = "/v2/tts";
 
-String speechText;                  //tts返回的用户输入语音
-String chatAggregated;              //累计大模型返回的文字
-unsigned long lastChatMsgTime = 0;  //最后大模型的时间，计算下间隔以后在播放
-String lastAudioUrl;
+String speechText;      //tts返回的用户输入语音
+String chatAggregated;  //累计大模型返回的文字
 String ttsAudioBase64;
 
 // 计时变量（音频发送）
@@ -505,8 +503,6 @@ void sendAudioData(bool firstFrame = false) {
 
   String jsonBufferStr;
   serializeJson(jsonDoc, jsonBufferStr);
-  Serial.printf("[tts2text]jsonBufferStr %s\n", jsonBufferStr.c_str());
-
 
   if (!wsSpeech.send(jsonBufferStr.c_str())) {
     Serial.println("[tts2text]数据发送失败");
@@ -564,52 +560,149 @@ void sendTTSRequest(const String& text) {
   }
 }
 
-void playAudio(String base64Str) {
-  Serial.println("[audio]playAudio");
 
+typedef struct {
+  String base64Data;
+} AudioTaskParam;
+
+bool isPlaying = false;
+#define AUDIO_TASK_STACK_SIZE 8192
+#define AUDIO_TASK_PRIORITY 1
+void playAudioAsync(String base64Str) {
+  Serial.printf("[playAudioAsync]free heap: %d\n", ESP.getFreeHeap());
+  if (isPlaying) {
+    Serial.println("[playAudioAsync] 当前正在播放，忽略请求");
+    return;
+  }
+  AudioTaskParam* param = new AudioTaskParam();
+  param->base64Data = base64Str;
+  BaseType_t result = xTaskCreatePinnedToCore(
+    playAudioTask,    // 任务函数
+    "playAudioTask",  // 任务名
+    AUDIO_TASK_STACK_SIZE,
+    param,  // 参数
+    AUDIO_TASK_PRIORITY,
+    NULL,  // 不需要 task handle
+    1      // 运行在 Core 1，避免和 WiFi 冲突
+  );
+  if (result != pdPASS) {
+    Serial.println("[playAudioAsync] 创建任务失败");
+    delete param;
+  }
+}
+
+void playAudioTask(void* pvParameters) {
+  Serial.printf("[playAudioTask]start free heap: %d\n", ESP.getFreeHeap());
+
+  isPlaying = true;
+
+  AudioTaskParam* param = (AudioTaskParam*)pvParameters;
+  String base64Str = param->base64Data;
+  delete param;  // 释放参数内存
+
+  // 清洗 base64 字符串
   base64Str.replace("\n", "");
   base64Str.replace("\r", "");
   base64Str.replace(" ", "");
 
-  if (base64Str.length() % 4 != 0) {
-    Serial.println("⚠️ base64 长度非法");
+  int inputLen = base64Str.length();
+  int maxOutputLen = inputLen * 3 / 4;
+  uint8_t* decodedAudio = (uint8_t*)malloc(maxOutputLen);
+  if (!decodedAudio) {
+    Serial.println("[audioTask] 内存分配失败");
+    vTaskDelete(NULL);
     return;
   }
 
-  size_t inputLen = base64Str.length();
-  size_t maxChunkInputLen = 768;  // 每次处理 768 个字符，输出约 576 字节
-  uint8_t* decodeBuf = (uint8_t*)malloc(576);
-  if (!decodeBuf) {
-    Serial.println("❌ 内存分配失败");
+  size_t outputLen = 0;
+  int ret = mbedtls_base64_decode(decodedAudio, maxOutputLen, &outputLen,
+                                  (const unsigned char*)base64Str.c_str(), inputLen);
+
+  if (ret != 0) {
+    Serial.printf("[audioTask] base64解码失败，错误码: -0x%04X\n", -ret);
+    free(decodedAudio);
+    vTaskDelete(NULL);
     return;
   }
+
+  Serial.printf("[audioTask] 解码成功，字节数: %d\n", outputLen);
 
   i2s_start(I2S_NUM_1);
-
-  for (size_t offset = 0; offset < inputLen; offset += maxChunkInputLen) {
-    size_t chunkLen = (inputLen - offset) > maxChunkInputLen ? maxChunkInputLen : (inputLen - offset);
-    size_t outputLen = 0;
-    int ret = mbedtls_base64_decode(
-      decodeBuf, 576, &outputLen,
-      (const unsigned char*)base64Str.substring(offset, offset + chunkLen).c_str(), chunkLen);
-
-    if (ret != 0) {
-      Serial.printf("❌ 解码失败 %d\n", ret);
+  size_t offset = 0;
+  size_t chunkSize = 512;
+  while (offset < outputLen) {
+    size_t toWrite = (outputLen - offset) > chunkSize ? chunkSize : (outputLen - offset);
+    size_t bytes_written = 0;
+    esp_err_t ret = i2s_write(I2S_NUM_1, decodedAudio + offset, toWrite, &bytes_written, 100 / portTICK_PERIOD_MS);
+    if (ret != ESP_OK) {
+      Serial.printf("[audioTask]I2S 写入失败: %d\n", ret);
       break;
     }
+    offset += bytes_written;
+  }
+  free(decodedAudio);
+  delay(100);
+  
+  i2s_zero_dma_buffer(I2S_NUM_1);
+  i2s_stop(I2S_NUM_1);
 
-    size_t written = 0;
-    i2s_write(I2S_NUM_1, decodeBuf, outputLen, &written, portMAX_DELAY);
+  Serial.printf("[playAudioTask]end free heap: %d\n", ESP.getFreeHeap());
+  isPlaying = false;
+  vTaskDelete(NULL);
+}
+
+void playAudio(String base64Str) {
+  Serial.println("[audio]playAudio");
+
+  // 清洗 base64 字符串
+  base64Str.replace("\n", "");
+  base64Str.replace("\r", "");
+  base64Str.replace(" ", "");
+
+  size_t inputLen = base64Str.length();
+  size_t maxOutputLen = inputLen * 3 / 4;
+
+  uint8_t* decodedAudio = (uint8_t*)malloc(maxOutputLen);
+  if (!decodedAudio) {
+    Serial.println("[audioTask]内存分配失败");
+    return;
   }
 
-  free(decodeBuf);
+  size_t outputLen = 0;
+  int ret = mbedtls_base64_decode(decodedAudio, maxOutputLen, &outputLen,
+                                  (const unsigned char*)base64Str.c_str(), inputLen);
+  if (ret != 0) {
+    Serial.printf("[audioTask]Base64 解码失败，错误码: %d\n", ret);
+    free(decodedAudio);
+    return;
+  }
+  Serial.printf("[audioTask]解码成功，字节数: %d\n", outputLen);
+
+  // **确保启动I2S**
+  i2s_start(I2S_NUM_1);
+  // 分段写入 I2S，每次写 512 字节（根据你缓冲大小调整）
+  size_t offset = 0;
+  size_t chunkSize = 512;
+  while (offset < outputLen) {
+    size_t toWrite = (outputLen - offset) > chunkSize ? chunkSize : (outputLen - offset);
+    size_t bytes_written = 0;
+    esp_err_t ret = i2s_write(I2S_NUM_1, decodedAudio + offset, toWrite, &bytes_written, 100 / portTICK_PERIOD_MS);
+    if (ret != ESP_OK) {
+      Serial.printf("❌ I2S 写入失败: %d\n", ret);
+      break;
+    }
+    offset += bytes_written;
+  }
+
+  free(decodedAudio);
+
+  // 这里可加适当 delay 或等待播放完毕逻辑
   delay(100);
+
   i2s_zero_dma_buffer(I2S_NUM_1);
   i2s_stop(I2S_NUM_1);
 }
-
-
-void txt2TTS(String text) {
+void sendTextAudio(String text) {
   if (wsTTS.available()) {
     wsTTS.close();
   }
@@ -633,7 +726,8 @@ void txt2TTS(String text) {
         }
         int status = doc["data"]["status"];
         ttsAudioBase64 = doc["data"]["audio"].as<String>();
-        playAudio(ttsAudioBase64);
+        // playAudio(ttsAudioBase64);
+        playAudioAsync(ttsAudioBase64);
         if (status == 2) {
           wsTTS.close();  //关闭连接
         }
@@ -672,7 +766,7 @@ void sendChatRequest(const String& userInput) {
   // 系统提示（可根据需要修改）
   JsonObject systemMsg = textArr.createNestedObject();
   systemMsg["role"] = "system";
-  systemMsg["content"] = "你是个翻译员,给一个单词或者短句,你返回对应的英语";
+  systemMsg["content"] = "帮我翻译成英语单词或者短句。不管输入多少长度,返回短句不能超过4个单词。如果超过了则返回‘error wrong’";
   // 用户输入，使用语音识别的结果
   JsonObject userMsg = textArr.createNestedObject();
   userMsg["role"] = "user";
@@ -687,9 +781,6 @@ void sendChatRequest(const String& userInput) {
   }
 }
 
-void processChatResult() {
-}
-
 void processSpeechResult() {
   // 没有录音，并且有结果的时候处理逻辑
   if (speechText == "" || isRecording) {
@@ -697,9 +788,6 @@ void processSpeechResult() {
   }
   Serial.println("[chat]speechText:" + speechText);
   chatAggregated = "";
-  if (wsChat.available()) {
-    wsChat.close();
-  }
   if (!wsChat.available()) {
     String chatURL = generateXunFeiAuthURL(chatHost, chatPath);
     Serial.println("[chat]大模型对话WS URL:" + chatURL);
@@ -722,8 +810,19 @@ void processSpeechResult() {
       }
       if (status == 2) {
         Serial.println("[chat]当前累计回复：" + chatAggregated);
+        chatAggregated.replace("\"", "'");
+        chatAggregated.replace("'", "'");
+        chatAggregated.replace("“", "'");
+        chatAggregated.replace("”", "'");
+        chatAggregated.replace("'", "'");
+        chatAggregated.replace("'", "'");
+        if (chatAggregated == "error wrong") {
+          sendMsg("", "出错了，请重新操作");
+        } else {
+          sendTextAudio(chatAggregated);
+        }
+        chatAggregated = "";
         wsChat.close();  //关闭连接
-        txt2TTS(chatAggregated);
       }
     });
     bool connected = wsChat.connect(chatURL);
@@ -737,8 +836,6 @@ void processSpeechResult() {
       Serial.println("[chat]连接成功");
       sendChatRequest(speechText);
     }
-  } else {
-    sendChatRequest(speechText);
   }
   speechText = "";
 }
@@ -771,7 +868,7 @@ void stopRecording() {
 }
 
 void handlePress1() {
-  sendMsg("", "听取中...");
+  sendMsg("", "聆听中...");
   connectToIFLY();
   if (!isRecording) {
     startRecording();
@@ -792,7 +889,8 @@ void handlePress2() {
 }
 
 void handleRelease2() {
-  playAudio(ttsAudioBase64);
+  // playAudio(ttsAudioBase64);
+  playAudioAsync(ttsAudioBase64);
   // sendMsg("", "[btn]按钮2松开");
 }
 
@@ -802,10 +900,8 @@ void initButtonListener() {
 }
 
 void displayTask(void* parameter) {
-  // 你的任务逻辑
   for (;;) {
     timeClient.update();
-    // Serial.println("[task]displayTask");
     vTaskDelay(1000 / portTICK_PERIOD_MS);
   }
 }
@@ -848,7 +944,7 @@ void setup() {
   } else {
     Serial.println("系统尚未完成");
   }
-  // txt2TTS("How are you？");
+  Serial.printf("setup free heap: %d\n", ESP.getFreeHeap());
 }
 
 void loop() {
@@ -862,9 +958,7 @@ void loop() {
   if (isRecording) {
     sendAudioData(false);
   }
-
   processSpeechResult();
-  processChatResult();
 }
 
 String lastMsg1 = "";
@@ -961,25 +1055,6 @@ String base64Encode(const void* data, size_t len) {
   free(buf);
   return result;
 }
-// String base64Encode(const uint8_t* data, size_t len) {
-//   if (len == 0 || data == nullptr) {
-//     Serial.println("Base64编码错误：无数据");
-//     return "";
-//   }
-//   size_t outputLen = 0;
-//   size_t bufSize = ((len + 2) / 3) * 4 + 1;
-//   char* buf = (char*)malloc(bufSize);
-//   if (!buf)
-//     return "";
-//   int ret = mbedtls_base64_encode((unsigned char*)buf, bufSize, &outputLen, data, len);
-//   if (ret != 0) {
-//     free(buf);
-//     return "";
-//   }
-//   String encoded = String(buf);
-//   free(buf);
-//   return encoded;
-// }
 
 String hmacSHA256(const String& key, const String& data) {
   unsigned char hmacResult[32];
@@ -995,81 +1070,3 @@ String hmacSHA256(const String& key, const String& data) {
   mbedtls_base64_encode(base64Result, sizeof(base64Result), &outLen, hmacResult, sizeof(hmacResult));
   return String((char*)base64Result);
 }
-
-const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-String base64_encode(uint8_t const* buf, unsigned int bufLen) {
-  String result;
-  int i = 0;
-  uint8_t array3[3];
-  uint8_t array4[4];
-
-  while (bufLen--) {
-    array3[i++] = *(buf++);
-    if (i == 3) {
-      array4[0] = (array3[0] & 0xfc) >> 2;
-      array4[1] = ((array3[0] & 0x03) << 4) + ((array3[1] & 0xf0) >> 4);
-      array4[2] = ((array3[1] & 0x0f) << 2) + ((array3[2] & 0xc0) >> 6);
-      array4[3] = array3[2] & 0x3f;
-
-      for (i = 0; i < 4; i++) {
-        result += base64_chars[array4[i]];
-      }
-      i = 0;
-    }
-  }
-
-  if (i) {
-    for (int j = i; j < 3; j++) array3[j] = '\0';
-
-    array4[0] = (array3[0] & 0xfc) >> 2;
-    array4[1] = ((array3[0] & 0x03) << 4) + ((array3[1] & 0xf0) >> 4);
-    array4[2] = ((array3[1] & 0x0f) << 2) + ((array3[2] & 0xc0) >> 6);
-    array4[3] = array3[2] & 0x3f;
-
-    for (int j = 0; j < i + 1; j++) result += base64_chars[array4[j]];
-    while ((i++ < 3)) result += '=';
-  }
-
-  return result;
-}
-
-
-int base64CharToValue(char c) {
-  if (c >= 'A' && c <= 'Z') return c - 'A';
-  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-  if (c >= '0' && c <= '9') return c - '0' + 52;
-  if (c == '+') return 62;
-  if (c == '/') return 63;
-  return 0;
-}
-
-// int decode_base64(const char* input, uint8_t* output) {
-//   size_t output_len = 0;
-//   int ret = mbedtls_base64_decode(output, 8192, &output_len, (const unsigned char*)input, strlen(input));
-//   if (ret != 0) {
-//     Serial.printf("Base64 解码失败，错误码 %d\n", ret);
-//     return 0;
-//   }
-//   return output_len;
-// }
-
-// int decode_base64(const char* input, uint8_t* output) {
-//   int len = strlen(input);
-//   int i = 0, j = 0;
-//   uint32_t buf = 0;
-//   int valb = -8;
-
-//   while (i < len) {
-//     char c = input[i++];
-//     if (c == '=') break;
-//     int val = base64CharToValue(c);
-//     buf = (buf << 6) | val;
-//     valb += 6;
-//     if (valb >= 0) {
-//       output[j++] = (buf >> valb) & 0xFF;
-//       valb -= 8;
-//     }
-//   }
-//   return j;  // 实际解码的字节数
-// }
